@@ -1,0 +1,15 @@
+{
+  "name": "pulgyeol",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "풀이결 — 수리논술 첨삭 서비스의 API 연결 전 웹 프로토타입",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "check": "node scripts/check.mjs",
+    "test": "node --test",
+    "build": "node scripts/build.mjs",
+    "preview": "node scripts/dev.mjs --dist"
+  }
+}
