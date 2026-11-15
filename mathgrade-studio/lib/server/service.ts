@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import type { Academy, AdmissionRecord, Assignment, Attachment, Question, Submission, WorkspaceState } from "../types";
 import { finiteNumber, HttpError, optionalText, requireText, seoulDay, sourceUrl, validateCriteria, validateReview } from "./validation";
+import { getSharingState, publishSharedQuestion, withdrawSharedQuestion, importSharedQuestion } from "./sharing";
 
 type Row = { data: string; revision: number };
 type User = NonNullable<WorkspaceState["user"]>;
@@ -102,6 +103,7 @@ async function workspaceState(request: Request): Promise<Response> {
   result.admissions = (values[5].results as unknown as Row[]).map(decode<AdmissionRecord>);
   result.usage.used = Number((values[6].results[0] as { used: number })?.used ?? 0);
   result.usage.remaining = Math.max(0, result.usage.limit - result.usage.used);
+  Object.assign(result, await getSharingState(db, user));
   return json(result);
 }
 
@@ -140,6 +142,8 @@ async function saveQuestion(body: Record<string, unknown>, user: User): Promise<
     notes: optionalText(body.notes, "채점 유의사항", 15000), criteria: validateCriteria(body.criteria),
     createdAt: existing ? decode<Question>(existing).createdAt : new Date().toISOString(),
     references: existing ? decode<Question>(existing).references ?? [] : [],
+    originSharedId: existing ? decode<Question>(existing).originSharedId : undefined,
+    rubricPending: false,
   };
   if (question.academicYear !== null && !Number.isInteger(question.academicYear)) throw new HttpError(400, "학년도를 정수로 입력하세요.");
   if (existing) {
@@ -164,18 +168,21 @@ async function createAssignment(body: Record<string, unknown>, user: User): Prom
   return json({ assignment }, 201);
 }
 
-async function submissionPayload(request: Request): Promise<{ body: Record<string, unknown>; file: File | null }> {
-  if (!request.headers.get("content-type")?.startsWith("multipart/form-data")) return { body: await bodyJson(request), file: null };
-  if (Number(request.headers.get("content-length")) > maximumUpload + 100000) throw new HttpError(413, "파일은 15MB까지 첨부할 수 있습니다.");
+async function submissionPayload(request: Request): Promise<{ body: Record<string, unknown>; file: File | null; problemFile: File | null }> {
+  if (!request.headers.get("content-type")?.startsWith("multipart/form-data")) return { body: await bodyJson(request), file: null, problemFile: null };
+  if (Number(request.headers.get("content-length")) > maximumUpload * 2 + 150000) throw new HttpError(413, "문제와 답안 파일은 각각 15MB까지 첨부할 수 있습니다.");
   let form: FormData;
   try { form = await request.formData(); } catch { throw new HttpError(400, "첨부 파일을 읽을 수 없습니다."); }
   let body;
   try { body = JSON.parse(String(form.get("payload"))); } catch { throw new HttpError(400, "답안 정보를 확인하세요."); }
   if (!body || Array.isArray(body) || typeof body !== "object") throw new HttpError(400, "답안 정보를 확인하세요.");
-  const value = form.get("file");
-  const file = value instanceof File && value.size ? value : null;
-  if (file && file.size > maximumUpload) throw new HttpError(413, "파일은 15MB까지 첨부할 수 있습니다.");
-  return { body, file };
+  const readFile = (key: string) => {
+    const value = form.get(key);
+    if (!(value instanceof File) || !value.size) return null;
+    if (value.size > maximumUpload) throw new HttpError(413, "파일은 각각 15MB까지 첨부할 수 있습니다.");
+    return value;
+  };
+  return { body, file: readFile("file"), problemFile: readFile("problemFile") };
 }
 
 async function validateFile(file: File): Promise<void> {
@@ -191,56 +198,105 @@ async function validateFile(file: File): Promise<void> {
 }
 
 async function createSubmission(request: Request, user: User): Promise<Response> {
-  const { body, file } = await submissionPayload(request);
+  const { body, file, problemFile } = await submissionPayload(request);
+  const db = database();
   const mode = body.mode;
   if (mode !== "academy" && mode !== "personal") throw new HttpError(400, "제출 유형을 선택하세요.");
   const clientRequestId = optionalText(body.clientRequestId, "요청 ID", 100) || crypto.randomUUID();
-  const duplicate = await database().prepare("SELECT data FROM submissions WHERE student_id = ? AND client_request_id = ?").bind(user.id, clientRequestId).first<Row>();
+  const duplicate = await db.prepare("SELECT data FROM submissions WHERE student_id = ? AND client_request_id = ?").bind(user.id, clientRequestId).first<Row>();
   if (duplicate) return json({ submission: await visibleSubmission(decode<Submission>(duplicate), user.id) });
   const answer = optionalText(body.answer, "학생 풀이", 50000);
+  const studentQuestion = optionalText(body.studentQuestion, "추가 질문", 10000);
   const studentCode = optionalText(body.studentCode, "학생 코드", 80) || user.name;
   if (!answer && !file) throw new HttpError(400, "학생 풀이를 입력하거나 원본 파일을 첨부하세요.");
   let academyId: string | null = null;
   let assignmentId: string | null = null;
   let question: Question;
-  if (mode === "academy") {
+  let direct = false;
+  const now = new Date().toISOString();
+  if (body.directQuestion !== undefined) {
+    if (!body.directQuestion || typeof body.directQuestion !== "object" || Array.isArray(body.directQuestion)) throw new HttpError(400, "함께 제출할 문제 내용을 확인하세요.");
+    if (body.assignmentId || body.questionId) throw new HttpError(400, "기존 문항과 직접 제출 중 하나를 선택하세요.");
+    const input = body.directQuestion as Record<string, unknown>;
+    const prompt = optionalText(input.prompt, "문제 본문", 20000);
+    if (!prompt && !problemFile) throw new HttpError(400, "문제 본문 또는 문제 원본 파일을 함께 제출하세요.");
+    if (mode === "academy") {
+      academyId = requireText(body.academyId, "학원 ID", 100);
+      const membership = await db.prepare("SELECT academy_id FROM memberships WHERE academy_id = ? AND user_id = ?").bind(academyId, user.id).first();
+      if (!membership) throw new HttpError(403, "참여한 학원에만 직접 제출할 수 있습니다.");
+    }
+    question = {
+      id: crypto.randomUUID(), ownerId: user.id, academyId: null, revision: 1,
+      title: requireText(input.title, "문항 제목", 200), prompt,
+      university: "", department: "", examKey: "", academicYear: null,
+      sourceLabel: requireText(input.sourceLabel, "문항 출처", 500), sourceUrl: sourceUrl(input.sourceUrl),
+      notes: "", criteria: [], references: [], rubricPending: true, createdAt: now,
+    };
+    direct = true;
+  } else if (mode === "academy") {
     assignmentId = requireText(body.assignmentId, "과제 ID", 100);
-    const row = await database().prepare("SELECT a.data FROM assignments a JOIN memberships m ON m.academy_id = a.academy_id WHERE a.id = ? AND m.user_id = ?").bind(assignmentId, user.id).first<Row>();
+    const row = await db.prepare("SELECT a.data FROM assignments a JOIN memberships m ON m.academy_id = a.academy_id WHERE a.id = ? AND m.user_id = ?").bind(assignmentId, user.id).first<Row>();
     if (!row) throw new HttpError(403, "참여한 학원의 과제만 제출할 수 있습니다.");
     const assignment = decode<Assignment>(row);
     academyId = assignment.academyId;
     question = assignment.question;
   } else {
     const questionId = requireText(body.questionId, "문항 ID", 100);
-    const row = await database().prepare("SELECT data FROM questions WHERE id = ? AND owner_id = ?").bind(questionId, user.id).first<Row>();
+    const row = await db.prepare("SELECT data FROM questions WHERE id = ? AND owner_id = ?").bind(questionId, user.id).first<Row>();
     if (!row) throw new HttpError(404, "첨삭할 문항을 등록하고 선택하세요.");
     question = decode<Question>(row);
   }
+  if ((file || problemFile) && !env.BUCKET) throw new HttpError(503, "원본 파일 저장소 연결을 준비 중입니다.");
+  for (const original of [file, problemFile]) if (original) await validateFile(original);
   const id = crypto.randomUUID();
-  const now = new Date().toISOString();
-  let attachment: Attachment | null = null;
-  let objectKey = "";
-  if (file) {
-    if (!env.BUCKET) throw new HttpError(503, "원본 파일 저장소 연결을 준비 중입니다.");
-    await validateFile(file);
+  const uploads: { attachment: Attachment; key: string; file: File }[] = [];
+  const prepareAttachment = (original: File | null, kind: string): Attachment | null => {
+    if (!original) return null;
     const attachmentId = crypto.randomUUID();
-    objectKey = `answers/${id}/${attachmentId}`;
-    attachment = { id: attachmentId, name: file.name.slice(0, 200), type: file.type, size: file.size, url: `/api/attachments/${attachmentId}` };
-    await env.BUCKET.put(objectKey, await file.arrayBuffer(), { httpMetadata: { contentType: file.type } });
-  }
-  const item: Submission = { id, studentId: user.id, studentCode, academyId, assignmentId, mode, question, answer, attachment, status: "pending", draft: null, final: null, revision: 1, createdAt: now, updatedAt: now };
-  const db = database();
+    const attachment = { id: attachmentId, name: original.name.slice(0, 200), type: original.type, size: original.size, url: `/api/attachments/${attachmentId}` };
+    uploads.push({ attachment, key: `${kind}/${id}/${attachmentId}`, file: original });
+    return attachment;
+  };
+  const attachment = prepareAttachment(file, "answers");
+  const problemAttachment = prepareAttachment(problemFile, "problems");
+  const item: Submission = { id, studentId: user.id, studentCode, academyId, assignmentId, mode, question, answer, studentQuestion, attachment, problemAttachment, rubricPending: Boolean(question.rubricPending || !question.criteria.length), status: "pending", draft: null, final: null, revision: 1, createdAt: now, updatedAt: now };
+  const uploadedKeys: string[] = [];
   try {
-    const writes = [db.prepare("INSERT INTO submissions (id, student_id, academy_id, assignment_id, mode, data, revision, client_request_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(id, user.id, academyId, assignmentId, mode, JSON.stringify(item), 1, clientRequestId, now)];
-    if (attachment) writes.push(db.prepare("INSERT INTO attachments (id, submission_id, object_key, name, content_type, size) VALUES (?, ?, ?, ?, ?, ?)").bind(attachment.id, id, objectKey, attachment.name, attachment.type, attachment.size));
+    for (const upload of uploads) {
+      await env.BUCKET!.put(upload.key, await upload.file.arrayBuffer(), { httpMetadata: { contentType: upload.file.type } });
+      uploadedKeys.push(upload.key);
+    }
+    const writes: D1PreparedStatement[] = [];
+    if (direct) writes.push(db.prepare("INSERT INTO questions (id, owner_id, academy_id, data, revision, created_at) VALUES (?, ?, ?, ?, ?, ?)").bind(question.id, user.id, null, JSON.stringify(question), 1, now));
+    writes.push(db.prepare("INSERT INTO submissions (id, student_id, academy_id, assignment_id, mode, data, revision, client_request_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(id, user.id, academyId, assignmentId, mode, JSON.stringify(item), 1, clientRequestId, now));
+    for (const upload of uploads) writes.push(db.prepare("INSERT INTO attachments (id, submission_id, object_key, name, content_type, size) VALUES (?, ?, ?, ?, ?, ?)").bind(upload.attachment.id, id, upload.key, upload.attachment.name, upload.attachment.type, upload.attachment.size));
     await db.batch(writes);
   } catch (error) {
-    if (objectKey) await env.BUCKET?.delete(objectKey);
+    await Promise.all(uploadedKeys.map((key) => env.BUCKET!.delete(key)));
     const existing = await db.prepare("SELECT data FROM submissions WHERE student_id = ? AND client_request_id = ?").bind(user.id, clientRequestId).first<Row>();
     if (existing) return json({ submission: await visibleSubmission(decode<Submission>(existing), user.id) });
     throw error;
   }
   return json({ submission: item }, 201);
+}
+
+async function setSubmissionRubric(id: string, body: Record<string, unknown>, user: User): Promise<Response> {
+  const item = await fetchSubmission(id);
+  if (!item.academyId) throw new HttpError(403, "담당 학원의 선생님만 채점기준을 설정할 수 있습니다.");
+  await ownedAcademy(item.academyId, user.id);
+  if (body.revision !== item.revision) throw new HttpError(409, "답안이 변경되었습니다. 다시 열어 주세요.", "REVISION_CONFLICT");
+  if (item.status === "approved") throw new HttpError(409, "확정을 다시 연 뒤 채점기준을 수정하세요.");
+  item.question = { ...item.question, criteria: validateCriteria(body.criteria), notes: optionalText(body.notes, "채점 유의사항", 15000), rubricPending: false, revision: item.question.revision + 1 };
+  item.rubricPending = false;
+  item.status = "pending";
+  item.draft = null;
+  item.final = null;
+  const previousRevision = item.revision;
+  item.revision += 1;
+  item.updatedAt = new Date().toISOString();
+  const result = await database().prepare("UPDATE submissions SET data = ?, revision = ? WHERE id = ? AND revision = ?").bind(JSON.stringify(item), item.revision, id, previousRevision).run();
+  if (!result.meta.changes) throw new HttpError(409, "다른 창에서 채점기준이 수정되었습니다.", "REVISION_CONFLICT");
+  return json({ submission: item });
 }
 
 async function reviewSubmission(id: string, body: Record<string, unknown>, user: User): Promise<Response> {
@@ -255,7 +311,12 @@ async function reviewSubmission(id: string, body: Record<string, unknown>, user:
     item.draft = item.final;
   } else {
     if (item.status === "approved") throw new HttpError(409, "채점을 다시 연 뒤 수정하세요.");
+    if (item.rubricPending || !item.question.criteria.length) throw new HttpError(409, "채점기준을 먼저 설정한 뒤 첨삭해 주세요.", "RUBRIC_REQUIRED");
     item.draft = validateReview(body, item.question.criteria, user.id);
+    if (body.action === "approve") {
+      requireText(item.draft.feedback, "확정 피드백", 15000);
+      if (item.studentQuestion) requireText(item.draft.questionResponse, "학생 질문에 대한 답변", 15000);
+    }
     item.status = body.action === "approve" ? "approved" : "draft";
     if (body.action === "approve") item.final = item.draft;
   }
@@ -386,6 +447,10 @@ export async function handleApi(request: Request): Promise<Response> {
       if (path === "questions") return await saveQuestion(body, user);
       if (path === "assignments") return await createAssignment(body, user);
       if (/^submissions\/[^/]+\/review$/.test(path)) return await reviewSubmission(path.split("/")[1], body, user);
+      if (/^submissions\/[^/]+\/rubric$/.test(path)) return await setSubmissionRubric(path.split("/")[1], body, user);
+      if (path === "shared-questions") return json(await publishSharedQuestion(database(), user, body), 201);
+      if (/^shared-questions\/[^/]+\/withdraw$/.test(path)) return json(await withdrawSharedQuestion(database(), user, path.split("/")[1]));
+      if (/^shared-questions\/[^/]+\/import$/.test(path)) return json(await importSharedQuestion(database(), user, path.split("/")[1]), 201);
       if (path === "admissions") return await saveAdmission(body, user);
       if (path === "analyze") {
         const item = await fetchSubmission(requireText(body.submissionId, "답안 ID", 100));

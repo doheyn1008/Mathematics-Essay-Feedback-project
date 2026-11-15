@@ -69,6 +69,7 @@ export function validateReview(body: Record<string, unknown>, criteria: Criterio
     scores,
     evidence: evidence.map((item) => optionalText(item, "채점 근거", 3000)),
     feedback: optionalText(body.feedback, "첨삭 내용", 15000),
+    questionResponse: optionalText(body.questionResponse, "학생 질문에 대한 답변", 15000),
     reviewedAt: new Date().toISOString(),
     reviewerId,
   };

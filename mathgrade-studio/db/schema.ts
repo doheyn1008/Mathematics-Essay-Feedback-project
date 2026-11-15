@@ -77,3 +77,28 @@ export const questionAttachments = sqliteTable("question_attachments", {
   kind: text("kind").notNull(),
   createdAt: text("created_at").notNull(),
 });
+
+export const sharedQuestions = sqliteTable("shared_questions", {
+  id: text("id").primaryKey(),
+  sourceQuestionId: text("source_question_id").notNull().references(() => questions.id),
+  contributorId: text("contributor_id").notNull(),
+  contentHash: text("content_hash").notNull(),
+  data: text("data").notNull(),
+  status: text("status").notNull(),
+  createdAt: text("created_at").notNull(),
+}, (table) => [uniqueIndex("shared_content_unique").on(table.contentHash), uniqueIndex("shared_source_unique").on(table.sourceQuestionId)]);
+
+export const pointEvents = sqliteTable("point_events", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  sharedQuestionId: text("shared_question_id").notNull().references(() => sharedQuestions.id),
+  amount: integer("amount").notNull(),
+  reason: text("reason").notNull(),
+  createdAt: text("created_at").notNull(),
+}, (table) => [uniqueIndex("point_shared_award_unique").on(table.sharedQuestionId)]);
+
+export const sharedImports = sqliteTable("shared_imports", {
+  sharedQuestionId: text("shared_question_id").notNull().references(() => sharedQuestions.id),
+  userId: text("user_id").notNull(),
+  questionId: text("question_id").notNull().references(() => questions.id),
+}, (table) => [primaryKey({ columns: [table.sharedQuestionId, table.userId] }), uniqueIndex("shared_import_question_unique").on(table.questionId)]);

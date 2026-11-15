@@ -15,12 +15,14 @@ export type Question = {
   notes: string;
   criteria: Criterion[];
   references?: (Attachment & { kind: "problem" | "rubric" })[];
+  originSharedId?: string;
+  rubricPending?: boolean;
   createdAt: string;
 };
 export type Academy = { id: string; name: string; ownerId: string; joinCode?: string; createdAt: string };
 export type Membership = { academyId: string; userId: string };
 export type Assignment = { id: string; academyId: string; title: string; question: Question; dueAt: string | null; createdAt: string };
-export type Review = { scores: number[]; feedback: string; evidence: string[]; reviewedAt: string; reviewerId: string };
+export type Review = { scores: number[]; feedback: string; evidence: string[]; reviewedAt: string; reviewerId: string; questionResponse?: string };
 export type Attachment = { id: string; name: string; type: string; size: number; url: string };
 export type Submission = {
   id: string;
@@ -31,6 +33,9 @@ export type Submission = {
   mode: "academy" | "personal";
   question: Question;
   answer: string;
+  studentQuestion?: string;
+  problemAttachment?: Attachment | null;
+  rubricPending?: boolean;
   attachment: Attachment | null;
   status: "pending" | "draft" | "approved";
   draft: Review | null;
@@ -55,6 +60,24 @@ export type AdmissionRecord = {
   sourceLabel: string;
   createdAt: string;
 };
+export type SharedQuestion = {
+  id: string;
+  sourceQuestionId: string;
+  contributorId: string;
+  contributorName: string;
+  title: string;
+  prompt: string;
+  criteria: Criterion[];
+  university: string;
+  academicYear: number | null;
+  sourceLabel: string;
+  sourceUrl: string;
+  rightsBasis: "own" | "permission";
+  rightsNote: string;
+  createdAt: string;
+  status: "published" | "withdrawn";
+};
+export type PointEvent = { id: string; amount: number; reason: string; createdAt: string; sharedQuestionId: string };
 export type WorkspaceState = {
   user: { id: string; email: string; name: string } | null;
   academies: Academy[];
@@ -66,4 +89,6 @@ export type WorkspaceState = {
   usage: { limit: number; used: number; remaining: number; day: string };
   ai: { configured: boolean };
   storageReady: boolean;
+  sharedQuestions?: SharedQuestion[];
+  points?: { balance: number; events: PointEvent[] };
 };

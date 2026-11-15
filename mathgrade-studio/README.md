@@ -16,6 +16,7 @@ D1 로컬 데이터베이스에 `drizzle/`의 SQL 마이그레이션을 파일�
 ```sh
 node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0000_lethal_maggott.sql
 node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0001_organic_doctor_octopus.sql
+node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0002_noisy_mephisto.sql
 npm run dev
 ```
 
@@ -25,10 +26,22 @@ npm run dev
 
 - 선생님은 학원을 만들고 참여 코드로 학생을 연결합니다. 대학·학년도·출처와 항목별 배점을 입력한 문항으로 과제를 배정합니다.
 - 학생은 과제에 풀이 텍스트와 이미지 또는 PDF를 제출합니다. 첨부는 최대 15 MB이며 계정별 접근 권한을 검사합니다.
+- 배정된 과제가 없어도 문제와 답안을 함께 올릴 수 있습니다. 문제 원본과 답안 원본을 각각 첨부하고 출처와 추가 질문을 기록합니다. 학원에 직접 제출한 문항은 선생님이 채점기준을 정한 뒤 검토합니다.
 - 선생님은 항목별 점수와 근거, 총평을 작성해 초안을 저장하거나 채점을 확정합니다. 학생에게는 확정 결과가 공개됩니다.
+- 학생의 추가 질문은 별도 답변으로 연결됩니다. 질문이 있는 답안은 답변을 작성해야 확정할 수 있으며, 확정된 질문과 답변은 PDF에도 포함됩니다.
 - 확정된 답안은 한글 글꼴이 포함된 A4 PDF로 개별 또는 묶음 다운로드합니다.
 - 개인용은 한국 시간 기준 하루 3회 완료된 AI 첨삭을 기준으로 하는 사용량 모델을 갖춥니다. 현재 실제 AI 제공자 연결은 대기 상태입니다.
 - 대학 추천은 같은 대학·시험·학년도·배점의 결과와 논술 최저점 자료가 있을 때 과거 기준과 비교합니다. 합격컷 전망은 비교 가능한 연도별 자료가 충분할 때 참고 범위를 제공합니다. 자료의 출처와 지표를 함께 확인합니다.
+
+## 비공개 제출 자료와 선생님 공유 자료실
+
+학생이 제출한 문제·풀이·질문은 본인과 담당 학원 선생님이 확인하는 비공개 첨삭 기록입니다. 제출만으로 공유 자료실에 공개되거나 모델 학습에 사용되지 않습니다.
+
+선생님은 본인이 등록한 문항을 선택하고 공개할 본문·채점기준·출처를 미리 확인한 뒤 공유할 수 있습니다. 직접 제작 여부 또는 이용 허락 근거와 공개 동의를 별도로 기록합니다. 개인 메모, 참고 원본 파일, 학생 답안과 개인정보는 공유 데이터에 복사하지 않습니다. 현재 공유 대상은 이 사이트를 이용하는 선생님 계정입니다.
+
+새 문항을 공유하면 기여 기록용 포인트 10P를 한 번 지급합니다. 같은 원문이나 문항을 다시 올려 중복 지급받을 수 없으며, 다른 선생님의 공유 문항을 가져온 경우에도 재공유 보상은 제공하지 않습니다. 공유 철회 후 재등록에도 추가 포인트는 생기지 않습니다. 포인트는 현금·결제 할인·AI 이용권으로 전환되지 않습니다.
+
+다른 선생님은 공유된 문항을 출처와 함께 자신의 비공개 문항 목록에 가져와 과제에 사용할 수 있습니다. 공유 철회는 자료실 노출을 중단하며, 이미 가져간 문항이나 배정한 과제를 자동 삭제하지 않습니다.
 
 ## 현재 연결 상태
 

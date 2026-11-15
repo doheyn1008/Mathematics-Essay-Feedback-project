@@ -262,3 +262,6 @@ td { padding: 13px 14px; color: #765e88; border-top: 1px solid #efe7f5; vertical
   .modal-body, .modal-header { padding: 18px; }
   .assignment-row { align-items: flex-start; }
 }
+
+.entry-mode-switch { display: flex; flex-wrap: wrap; gap: 8px; }
+.entry-mode-switch .button { flex: 1 1 160px; justify-content: center; }

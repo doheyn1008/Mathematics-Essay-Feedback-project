@@ -27,6 +27,12 @@ function checkApproved(submission: Submission) {
   if (submission.status !== "approved" || !review) {
     throw new Error("선생님이 확정한 답안만 PDF로 내보낼 수 있습니다.");
   }
+  if (submission.rubricPending || !submission.question.criteria.length) {
+    throw new Error("채점기준을 등록하고 첨삭을 확정한 뒤 PDF로 내보내 주세요.");
+  }
+  if (submission.studentQuestion?.trim() && !review.questionResponse?.trim()) {
+    throw new Error("학생의 추가 질문에 대한 확정 답변이 없습니다.");
+  }
   if (review.scores.length !== submission.question.criteria.length) {
     throw new Error("채점 항목과 확정 점수가 일치하지 않습니다.");
   }
@@ -210,6 +216,12 @@ export async function generateFeedbackPdf(submissions: Submission[], options: Pd
     write(`선생님 확정  ·  ${displayDate(review.reviewedAt)}  ·  ${Number(total.toFixed(2))} / ${Number(maximum.toFixed(2))}점`, 10, MUTED, 17);
     heading("학생 풀이");
     write(submission.answer || "제출한 원본 답안은 이 리포트 뒤에 첨부되어 있습니다.");
+    if (submission.studentQuestion?.trim()) {
+      heading("학생의 추가 질문");
+      write(submission.studentQuestion);
+      heading("질문에 대한 답변");
+      write(review.questionResponse!);
+    }
     heading("항목별 평가");
     question.criteria.forEach((criterion, index) => {
       ensureSpace(65);
@@ -223,6 +235,8 @@ export async function generateFeedbackPdf(submissions: Submission[], options: Pd
     const source = [question.university, question.academicYear ? `${question.academicYear}학년도` : "", question.sourceLabel].filter(Boolean).join(" · ");
     write(source || "자체 등록 문항", 9, MUTED, 4);
     if (question.sourceUrl) write(question.sourceUrl, 8.5, MUTED, 4);
+    // A submitted problem original is a private reference, not an output attachment.
+    // Only the student's answer attachment is appended to this report.
     await appendAttachment(submission);
   }
 

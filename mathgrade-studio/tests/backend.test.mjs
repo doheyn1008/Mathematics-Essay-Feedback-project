@@ -46,10 +46,10 @@ const fakeEnv = {
   },
 };
 globalThis.__mathgradeTestEnv = fakeEnv;
-for (const name of ['validation', 'service']) {
+for (const name of ['validation', 'sharing', 'service']) {
   let input = await readFile(`lib/server/${name}.ts`, 'utf8');
   input = input.replace('import { env } from "cloudflare:workers";', 'const env = globalThis.__mathgradeTestEnv;');
-  input = input.replace('from "./validation"', 'from "./validation.mjs"');
+  input = input.replace('from "./validation"', 'from "./validation.mjs"').replace('from "./sharing"', 'from "./sharing.mjs"');
   const compiled = ts.transpileModule(input, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
   await writeFile(join(scratch, `${name}.mjs`), compiled);
 }
@@ -128,9 +128,69 @@ try {
   assert.equal((await call('admissions', 'student', { ...admissionBody, id: admission.id, revision: 1 })).status, 409);
   assert.equal((await call('state', 'student')).result.admissions.length, 1);
   assert.equal((await call('state', 'outsider')).result.admissions.length, 0);
+  // Direct submissions save the student problem and answer privately, without inventing a rubric.
+  const directBody = { mode: 'academy', academyId: academy.id, directQuestion: { title: '직접 제출', prompt: '', sourceLabel: '직접 작성', sourceUrl: '' }, answer: '나의 풀이', studentQuestion: '왜 끝점도 확인해야 하나요?', clientRequestId: 'direct-one' };
+  const directUpload = new FormData();
+  directUpload.set('payload', JSON.stringify(directBody));
+  directUpload.set('problemFile', new File(['%PDF-1.7 problem'], 'problem.pdf', { type: 'application/pdf' }));
+  directUpload.set('file', new File(['%PDF-1.7 answer'], 'answer.pdf', { type: 'application/pdf' }));
+  assert.equal((await call('submissions', 'outsider', directUpload)).status, 403);
+  const directResult = await call('submissions', 'student', directUpload);
+  assert.equal(directResult.status, 201);
+  const directSubmission = directResult.result.submission;
+  assert.equal(directSubmission.rubricPending, true);
+  assert.deepEqual(directSubmission.question.criteria, []);
+  assert.equal(directSubmission.studentQuestion, directBody.studentQuestion);
+  assert.equal(directSubmission.question.ownerId, 'student');
+  assert.equal((await call(`attachments/${directSubmission.problemAttachment.id}`, 'teacher')).status, 200);
+  assert.equal((await call(`attachments/${directSubmission.problemAttachment.id}`, 'outsider')).status, 403);
+  assert.equal((await call('submissions', 'student', directUpload)).result.submission.id, directSubmission.id);
+  assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM questions WHERE id = ?').get(directSubmission.question.id).count, 1);
+  assert.equal((await call('state', 'outsider')).result.questions.length, 0);
+  assert.equal((await call(`submissions/${directSubmission.id}/review`, 'teacher', { revision: 1, action: 'approve', scores: [], evidence: [], feedback: '보완' })).result.code, 'RUBRIC_REQUIRED');
+  const rubricBody = { revision: 1, criteria: questionBody.criteria, notes: '끝점 확인' };
+  assert.equal((await call(`submissions/${directSubmission.id}/rubric`, 'student', rubricBody)).status, 403);
+  const rubricSet = (await call(`submissions/${directSubmission.id}/rubric`, 'teacher', rubricBody)).result.submission;
+  assert.equal(rubricSet.revision, 2);
+  assert.equal(rubricSet.rubricPending, false);
+  assert.equal((await call(`submissions/${directSubmission.id}/rubric`, 'teacher', rubricBody)).status, 409);
+  const reviewQuestion = { revision: 2, action: 'approve', scores: [4, 6], evidence: ['근거','결론'], feedback: '좋은 풀이입니다.' };
+  assert.equal((await call(`submissions/${directSubmission.id}/review`, 'teacher', reviewQuestion)).status, 400, 'student question requires a response before approval');
+  assert.equal((await call(`submissions/${directSubmission.id}/review`, 'teacher', { ...reviewQuestion, feedback: '', questionResponse: '끝점도 후보입니다.' })).status, 400, 'final feedback is required on server');
+  const qDraft = (await call(`submissions/${directSubmission.id}/review`, 'teacher', { ...reviewQuestion, action: 'draft', questionResponse: '끝점도 후보입니다.' })).result.submission;
+  const hidden = (await call(`submissions/${directSubmission.id}`, 'student')).result.submission;
+  assert.equal(hidden.draft, null);
+  assert.equal(hidden.final, null);
+  assert.equal(hidden.studentQuestion, directBody.studentQuestion);
+  const qApproved = (await call(`submissions/${directSubmission.id}/review`, 'teacher', { ...reviewQuestion, revision: qDraft.revision, questionResponse: '닫힌 구간의 끝점에서도 극값을 가질 수 있어 비교합니다.' })).result.submission;
+  assert.equal(qApproved.final.questionResponse, '닫힌 구간의 끝점에서도 극값을 가질 수 있어 비교합니다.');
+  assert.equal((await call(`report-data?ids=${directSubmission.id}`, 'student')).result.submissions[0].studentQuestion, directBody.studentQuestion);
+  assert.equal((await call(`submissions/${directSubmission.id}/rubric`, 'teacher', { ...rubricBody, revision: qApproved.revision })).status, 409);
+  const personal = (await call('submissions', 'student', { ...directBody, mode: 'personal', directQuestion: { ...directBody.directQuestion, prompt: '함수의 최댓값을 구하시오.' }, clientRequestId: 'personal-direct' })).result.submission;
+  assert.equal(personal.academyId, null);
+  assert.equal((await call(`submissions/${personal.id}`, 'teacher')).status, 403);
+  assert.equal((await call(`submissions/${personal.id}/rubric`, 'teacher', rubricBody)).status, 403);
+  assert.equal((await call('state', 'student')).result.points.balance, 0);
+  assert.deepEqual((await call('state', 'student')).result.sharedQuestions, []);
+  const invalidProblem = new FormData();
+  invalidProblem.set('payload', JSON.stringify({ ...directBody, clientRequestId: 'invalid-file' }));
+  invalidProblem.set('file', new File(['%PDF-1.7 good'], 'answer.pdf', { type: 'application/pdf' }));
+  invalidProblem.set('problemFile', new File(['bad'], 'problem.pdf', { type: 'application/pdf' }));
+  const beforeBad = files.size;
+  assert.equal((await call('submissions', 'student', invalidProblem)).status, 400);
+  assert.equal(files.size, beforeBad, 'both originals validated before any file write');
+  // Imported provenance survives private editing and cannot be stripped for a new award.
+  const published = (await call('shared-questions', 'teacher', { questionId: question.id, contributorName: '선생님', rightsBasis: 'own', rightsNote: '', rightsConfirmed: true, shareConfirmed: true })).result.sharedQuestion;
+  const teacher2 = (await call('academies', 'other-teacher', { name: '두 번째 학원' })).result.academy;
+  assert.ok(teacher2.id);
+  const imported = (await call(`shared-questions/${published.id}/import`, 'other-teacher', {})).result.question;
+  assert.equal(imported.originSharedId, published.id);
+  const editedImport = (await call('questions', 'other-teacher', { ...imported, prompt: '수정된 가져온 문제', originSharedId: undefined })).result.question;
+  assert.equal(editedImport.originSharedId, published.id);
+  assert.equal((await call('shared-questions', 'other-teacher', { questionId: imported.id, contributorName: '다른 선생님', rightsBasis: 'own', rightsConfirmed: true, shareConfirmed: true })).status, 409);
   const crossOrigin = await handleApi(new Request('https://test.example/api/academies', { method: 'POST', headers: { origin: 'https://other.example', 'oai-authenticated-user-id': 'teacher', 'content-type': 'application/json' }, body: JSON.stringify({ name: 'bad' }) }));
   assert.equal(crossOrigin.status, 403);
-  console.log('Backend regression checks passed — auth, isolation, review and admission revisions, idempotency, files, and unconfigured AI.');
+  console.log('Backend regression checks passed — private direct uploads, student questions, rubric gates, sharing provenance, auth, revisions, files, and unconfigured AI.');
 } finally {
   sqlite.close();
   delete globalThis.__mathgradeTestEnv;
