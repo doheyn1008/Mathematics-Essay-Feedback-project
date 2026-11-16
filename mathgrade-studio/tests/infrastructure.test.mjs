@@ -29,7 +29,7 @@ test('connector bridge targets the configured IPv4, IPv6 or hostname listener', 
   assert.equal(connectorBridgeOrigin(true, 4173), 'http://127.0.0.1:4173');
 });
 
-test('relative runtime overrides retain the caller directory after the wrapper changes cwd', async () => {
+test('relative runtime overrides retain the caller directory after the wrapper changes cwd', { skip: process.platform === 'win32' }, async () => {
   const directory = await mkdtemp(path.join(tmpdir(), 'mathgrade-runtime-'));
   try {
     const result = spawnSync('bash', [path.join(appDir, 'scripts/sites-env.sh'), '--', process.execPath, '-e', 'const fs=require("node:fs"),path=require("node:path"); if (!path.isAbsolute(process.env.SITES_RUNTIME_ROOT) || !fs.existsSync(process.env.TMPDIR)) process.exit(1); console.log(process.env.SITES_RUNTIME_ROOT)'], { cwd: directory, env: { ...process.env, SITES_RUNTIME_ROOT: '.runtime' }, encoding: 'utf8' });
@@ -38,7 +38,7 @@ test('relative runtime overrides retain the caller directory after the wrapper c
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('build wrapper runs after checkout strips executable file modes', async () => {
+test('build wrapper runs after checkout strips executable file modes', { skip: process.platform === 'win32' }, async () => {
   const directory = await mkdtemp(path.join(tmpdir(), 'mathgrade-wrapper-'));
   try {
     await mkdir(path.join(directory, 'scripts'));

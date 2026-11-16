@@ -146,3 +146,34 @@ export const productPoints = sqliteTable("product_points", {
 export const productImports = sqliteTable("product_imports", {
   contributionId: text("contribution_id").notNull().references(() => productContributions.id), userId: text("user_id").notNull(), examId: text("exam_id").notNull().references(() => productExams.id),
 }, table => [primaryKey({ columns: [table.contributionId, table.userId] }), uniqueIndex("product_import_exam_unique").on(table.examId)]);
+
+export const productUsers = sqliteTable("product_users", {
+  id: text("id").primaryKey(), name: text("name").notNull(), email: text("email").notNull().default(""), createdAt: text("created_at").notNull(),
+});
+export const productCredentials = sqliteTable("product_credentials", {
+  username: text("username").primaryKey(), userId: text("user_id").notNull().references(() => productUsers.id), passwordHash: text("password_hash").notNull(),
+}, table => [uniqueIndex("product_credentials_user_unique").on(table.userId)]);
+export const productSessions = sqliteTable("product_sessions", {
+  tokenHash: text("token_hash").primaryKey(), userId: text("user_id").notNull().references(() => productUsers.id), expiresAt: text("expires_at").notNull(),
+});
+export const productAuthAttempts = sqliteTable("product_auth_attempts", {
+  key: text("key").primaryKey(), attempts: integer("attempts").notNull(), expiresAt: integer("expires_at").notNull(),
+});
+export const productLinks = sqliteTable("product_links", {
+  provider: text("provider").notNull(), subject: text("subject").notNull(), userId: text("user_id").notNull().references(() => productUsers.id), email: text("email").notNull().default(""),
+}, table => [primaryKey({columns:[table.provider,table.subject]}),uniqueIndex("product_link_user_provider_unique").on(table.userId,table.provider)]);
+export const productOauth = sqliteTable("product_oauth", {
+  stateHash: text("state_hash").primaryKey(), provider: text("provider").notNull(), userId: text("user_id"), verifier: text("verifier").notNull(), expiresAt: text("expires_at").notNull(),
+});
+export const productNotificationSettings = sqliteTable("product_notification_settings", {
+  userId: text("user_id").primaryKey(), data: text("data").notNull(), updatedAt: text("updated_at").notNull(),
+});
+export const productNotifications = sqliteTable("product_notifications", {
+  id: text("id").primaryKey(), userId: text("user_id").notNull(), channel: text("channel").notNull(), eventKey: text("event_key").notNull(), kind: text("kind").notNull(), submissionId: text("submission_id").notNull(), status: text("status").notNull().default("awaiting_provider"), createdAt: text("created_at").notNull(),
+}, table => [uniqueIndex("product_notification_event_unique").on(table.userId,table.channel,table.eventKey)]);
+export const productPointEvents = sqliteTable("product_point_events", {
+  id: text("id").primaryKey(), userId: text("user_id").notNull(), contributionId: text("contribution_id"), learnerId: text("learner_id"), kind: text("kind").notNull(), amount: integer("amount").notNull(), policyVersion: text("policy_version").notNull(), createdAt: text("created_at").notNull(),
+}, table => [uniqueIndex("product_point_usage_unique").on(table.contributionId,table.learnerId,table.kind)]);
+export const productExamRequests = sqliteTable("product_exam_requests", {
+  userId: text("user_id").notNull(), requestId: text("request_id").notNull(), examId: text("exam_id").notNull().references(() => productExams.id),
+}, table => [primaryKey({columns:[table.userId,table.requestId]})]);

@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import type { Contribution, ContributionPoint, Exam, ExamFile } from "../product-types";
 import { getExam, getProfile, requireProfile, requireEntitlement, readProductJson, productJson, checkProductOrigin, type ProductUser } from "./product-auth";
-import { HttpError, requireText, optionalText } from "./validation";
+import { HttpError, requireText, optionalText, sourceUrl } from "./validation";
 
 const CONSENT_VERSION = "premium-reuse-v1";
 const CONSENT_SCOPE = "개인용 유료 프리미엄 회원에게 문제 자료를 제공하고 해당 회원이 학습·첨삭에 이용하는 것에 동의합니다. 학생 답안과 비공개 참고자료는 포함하지 않습니다.";
@@ -67,8 +67,8 @@ async function publish(db: D1Database, user: ProductUser, body: Record<string, u
     url: `/api/product/premium/files/${id}/${file.id}`,
   }));
   const snapshot: Exam = {
-    id: exam.id, ownerId: "", classId: null, title: exam.title, sourceLabel: exam.sourceLabel, sourceUrl: exam.sourceUrl,
-    items: exam.items.map(item => ({...item})), files, releaseMode: "ai_immediate", revision: exam.revision, createdAt: now,
+    id: exam.id, ownerId: "", classId: null, title: exam.title, sourceLabel: requireText(body.sourceLabel ?? exam.sourceLabel, "기여 문제 출처", 500), sourceUrl: sourceUrl(body.sourceUrl ?? exam.sourceUrl),
+    items: exam.items.map(item => ({id:item.id,label:item.label,maxScore:item.maxScore,criteria:"",...(item.parentId ? {parentId:item.parentId}: {})})), files, releaseMode: "ai_immediate", revision: exam.revision, createdAt: now,
   };
   const contribution: Contribution = {
     id, sourceExamId: exam.id, sourceRevision: exam.revision, contributorId: user.id, contributorName, exam: snapshot,

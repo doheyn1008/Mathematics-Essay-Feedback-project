@@ -53,6 +53,7 @@ function fixture(t) {
   } };
   for (const key of Object.keys(runtime)) delete runtime[key];
   runtime.DB = db;
+  runtime.PRODUCT_HOST_LOGIN = "true";
   runtime.BUCKET = {
     async put(key, bytes) { objects.set(key,new Uint8Array(bytes)); },
     async delete(key) { objects.delete(key); },
@@ -63,6 +64,7 @@ function fixture(t) {
     const method = options.method ?? (body === undefined ? 'GET' : 'POST');
     const headers = new Headers({ origin: options.origin ?? 'https://example.test' });
     if (user) { headers.set('oai-authenticated-user-id',user); headers.set('oai-authenticated-user-full-name',encodeURIComponent(`이름 ${user}`)); headers.set('oai-authenticated-user-full-name-encoding','percent-encoded-utf-8'); }
+    if (options.cookie) headers.set('cookie',options.cookie);
     if (body !== undefined && !(body instanceof FormData)) headers.set('content-type','application/json');
     const response = await routeApi(new Request(`https://example.test${path.startsWith('/api/') ? path : '/api/product/'+path}`, {
       method,headers,body: body === undefined ? undefined : body instanceof FormData ? body : JSON.stringify(body),
@@ -312,4 +314,117 @@ test('concurrent completions cannot exceed quota and concurrent reviews cannot o
   const detail=await f.ok(`submissions/${winner.id}`,'teacher');
   assert.equal(detail.versions.length,2); assert.equal(detail.submission.revision,3);
   assert.equal(detail.versions[1].authorType,'ai');
+});
+
+
+test('native credentials create fixed-role accounts, rotate and revoke sessions, and never trust host mock headers by default',async t=>{
+  const f=fixture(t);delete runtime.PRODUCT_HOST_LOGIN;
+  assert.equal((await f.call('state','forged-host')).value.user,null);
+  const signup=await f.call('auth/signup',null,{username:'tester_1',password:'correct horse battery',displayName:'김학생',accountType:'academy_student'});
+  assert.equal(signup.status,200);const cookie=signup.headers.get('set-cookie').split(';')[0];
+  assert.match(signup.headers.get('set-cookie'),/HttpOnly/);assert.match(signup.headers.get('set-cookie'),/Secure/);
+  const state=(await f.call('state',null,undefined,{cookie})).value;
+  assert.equal(state.profile.accountType,'academy_student');assert.equal(state.profile.displayName,'김학생');assert.equal(state.entitlement,null);
+  assert.equal(f.sqlite.prepare('SELECT password_hash FROM product_credentials').get().password_hash.includes('correct horse'),false);
+  assert.equal((await f.call('auth/login',null,{username:'tester_1',password:'wrong password'})).status,401);
+  assert.equal((await f.call('auth/signup',null,{username:'tester_1',password:'another valid password',displayName:'다른이름',accountType:'teacher'})).status,409);
+  const login=await f.call('auth/login',null,{username:'TESTER_1',password:'correct horse battery'}, {cookie});
+  assert.equal(login.status,200);assert.equal((await f.call('state',null,undefined,{cookie})).value.user,null);
+  const nextCookie=login.headers.get('set-cookie').split(';')[0];
+  assert.equal((await f.call('account',null,{accountType:'teacher',displayName:'권한변경'}, {cookie:nextCookie})).value.code,'ACCOUNT_TYPE_LOCKED');
+  assert.equal((await f.call('auth/logout',null,{}, {cookie:nextCookie,origin:'https://evil.test'})).status,403);
+  assert.equal((await f.call('auth/logout',null,{}, {cookie:nextCookie})).status,200);
+  assert.equal((await f.call('state',null,undefined,{cookie:nextCookie})).value.user,null);
+  assert.equal((await f.call('auth/google',null)).value.code,'OAUTH_NOT_CONFIGURED');
+  assert.equal((await f.call('auth/kakao',null)).value.code,'OAUTH_NOT_CONFIGURED');
+});
+
+test('credential guessing has a bounded server-side attempt window',async t=>{
+  const f=fixture(t);delete runtime.PRODUCT_HOST_LOGIN;
+  for(let i=0;i<12;i++)assert.equal((await f.call('auth/login',null,{username:'missing_user',password:'incorrect password'})).status,401);
+  assert.equal((await f.call('auth/login',null,{username:'missing_user',password:'incorrect password'})).status,429);
+});
+
+test('private exam sources are optional, flat items retain IDs, and creation retries reuse one exam and files',async t=>{
+  const f=fixture(t);await f.register('teacher','teacher',true);
+  const payload={title:'비공개 시험',createRequestId:'exam-retry',items:[{id:'q1-1',label:'1-1',maxScore:10,criteria:'비공개 기준'},{id:'q1-2',label:'1-2',maxScore:20,criteria:''}]};
+  const saved=(await f.ok('exams','teacher',f.form(payload,[{role:'problem'}]),201)).exam;
+  assert.equal(saved.sourceLabel,'');assert.equal(saved.items[0].id,'q1-1');assert.equal(saved.items[0].parentId,undefined);
+  const retry=await f.ok('exams','teacher',f.form(payload,[{role:'problem'}]));
+  assert.equal(retry.exam.id,saved.id);assert.equal(f.objects.size,1);
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM product_exams').get().n,1);
+  assert.equal((await f.call('contributions','teacher',{examId:saved.id,revision:1,contributorName:'선생님',rightsBasis:'own',rightsConfirmed:true,premiumConfirmed:true})).status,400);
+  const contributed=(await f.ok('contributions','teacher',{examId:saved.id,revision:1,sourceLabel:'내 창작물',contributorName:'선생님',rightsBasis:'own',rightsConfirmed:true,premiumConfirmed:true},201)).contribution;
+  assert.equal(contributed.exam.sourceLabel,'내 창작물');assert.equal(contributed.exam.items[0].criteria,'');
+  assert.equal((await f.ok('state','teacher')).exams[0].items[0].criteria,'비공개 기준');
+});
+
+function linkAndOptIn(f,userId,preferences={google:true,kakao:true,submissions:true,feedback:true}){
+  f.sqlite.prepare("INSERT INTO product_users (id,name,email,created_at) VALUES (?,?,?,?)").run(userId,userId,`${userId}@example.test`,timestamp);
+  for(const provider of ['google','kakao'])f.sqlite.prepare('INSERT INTO product_links (provider,subject,user_id,email) VALUES (?,?,?,?)').run(provider,userId,userId,`${userId}@example.test`);
+  f.sqlite.prepare('INSERT INTO product_notification_settings (user_id,data,updated_at) VALUES (?,?,?)').run(userId,JSON.stringify(preferences),timestamp);
+}
+test('notification consent is separate, submission notices target class teachers, and only published versions queue student notices',async t=>{
+  const f=fixture(t);const {work}=await f.base();linkAndOptIn(f,'teacher');linkAndOptIn(f,'student');
+  const submitted=await f.submit('student',work.id);
+  assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM product_notifications WHERE user_id='teacher' AND kind='submission'").get().n,2);
+  await f.ok(`submissions/${submitted.id}/review`,'teacher',{revision:1,publish:false,result:result()});
+  assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM product_notifications WHERE user_id='student'").get().n,0);
+  await f.ok(`submissions/${submitted.id}/review`,'teacher',{revision:2,publish:true,result:result()});
+  assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM product_notifications WHERE user_id='student'").get().n,2);
+  const settings=await f.ok('account/settings','student');assert.equal(settings.deliveryConfigured,false);assert.ok(settings.notifications.every(n=>n.status==='awaiting_provider'));
+  await f.ok('account/settings','student',{google:false,kakao:false,submissions:false,feedback:false});
+  await f.ok(`submissions/${submitted.id}/review`,'teacher',{revision:3,publish:true,result:result()});
+  assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM product_notifications WHERE user_id='student'").get().n,2);
+  assert.equal((await f.call('account/points/purchase','student',{amount:100000})).value.code,'PAYMENT_NOT_CONFIGURED');
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM product_point_events').get().n,0);
+});
+
+test('immediate AI publishes notices; review-first AI and unlinked accounts do not',async t=>{
+  const f=fixture(t);const {work}=await f.base('ai_immediate');linkAndOptIn(f,'student');
+  const first=await f.submit('student',work.id);await ingestAnalysisResult(f.db,first.id,1,result());
+  assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM product_notifications WHERE kind='feedback'").get().n,2);
+  const other=await f.submit('student',work.id);const row=f.sqlite.prepare('SELECT data FROM product_submissions WHERE id=?').get(other.id);const data=JSON.parse(row.data);data.releaseMode='teacher_review';f.sqlite.prepare('UPDATE product_submissions SET data=? WHERE id=?').run(JSON.stringify(data),other.id);
+  await ingestAnalysisResult(f.db,other.id,1,result());
+  assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM product_notifications WHERE kind='feedback'").get().n,2);
+});
+
+test('contribution use rewards require a first successful AI completion per learner, never imports or repeated submissions',async t=>{
+  const f=fixture(t);await f.register('teacher','teacher',true);await f.register('personal','personal',true);f.grant('personal','personal_premium');
+  runtime.CONTRIBUTION_USE_POINTS='1';runtime.CONTRIBUTION_USE_POLICY_VERSION='pilot-v1';
+  const exam=await f.exam();const shared=(await f.ok('contributions','teacher',{examId:exam.id,revision:1,contributorName:'선생님',rightsBasis:'own',rightsConfirmed:true,premiumConfirmed:true},201)).contribution;
+  const imported=(await f.ok(`premium/${shared.id}/import`,'personal',{},201)).exam;
+  await f.ok(`premium/${shared.id}/import`,'personal',{},201);
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM product_point_events').get().n,0);
+  const first=await f.submit('personal',undefined,{examId:imported.id});await ingestAnalysisResult(f.db,first.id,1,result());
+  const second=await f.submit('personal',undefined,{examId:imported.id});await ingestAnalysisResult(f.db,second.id,1,result());
+  const points=(await f.ok('account/settings','teacher')).points;
+  assert.equal(points.length,1);assert.equal(points[0].amount,1);assert.equal(points[0].kind,'usage_reward');
+  assert.equal((await f.ok('account/settings','personal')).points.length,0);
+});
+
+
+test('configured Google OAuth binds state to the browser, uses PKCE, and never auto-links by email',async t=>{
+  const f=fixture(t);delete runtime.PRODUCT_HOST_LOGIN;runtime.GOOGLE_CLIENT_ID='test-client';runtime.GOOGLE_CLIENT_SECRET='test-secret';
+  f.sqlite.prepare("INSERT INTO product_users (id,name,email,created_at) VALUES ('other','기존회원','same@example.test',?)").run(timestamp);
+  const start=await f.call('auth/google',null);assert.equal(start.status,303);
+  const destination=new URL(start.headers.get('location'));assert.equal(destination.origin,'https://accounts.google.com');assert.equal(destination.searchParams.get('code_challenge_method'),'S256');assert.equal(destination.searchParams.get('scope'),'openid email profile');
+  const state=destination.searchParams.get('state'),cookie=start.headers.get('set-cookie').split(';')[0];
+  assert.equal((await f.call(`auth/google/callback?code=test-code&state=${state}`,null,undefined,{cookie:'mg_oauth=invalid'})).status,400);
+  const originalFetch=globalThis.fetch;t.after(()=>{globalThis.fetch=originalFetch;});let calls=0;
+  globalThis.fetch=async(url,options)=>{calls++;if(String(url).endsWith('/token')){const params=new URLSearchParams(options.body);assert.equal(params.get('client_secret'),'test-secret');assert.ok(params.get('code_verifier'));return Response.json({access_token:'test-access'});}assert.equal(String(url),'https://openidconnect.googleapis.com/v1/userinfo');return Response.json({sub:'google-subject',email:'same@example.test',email_verified:true,name:'새 회원'});};
+  const callback=await f.call(`auth/google/callback?code=test-code&state=${state}`,null,undefined,{cookie});assert.equal(callback.status,303);assert.equal(callback.headers.get('location'),'/');assert.equal(calls,2);
+  const linked=f.sqlite.prepare('SELECT user_id FROM product_links').get();assert.notEqual(linked.user_id,'other');
+  assert.equal((await f.call(`auth/google/callback?code=test-code&state=${state}`,null,undefined,{cookie})).status,400);assert.equal(calls,2);
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM product_notification_settings').get().n,0);
+});
+
+test('Kakao OAuth links only the current signed-in account without changing notification consent',async t=>{
+  const f=fixture(t);runtime.KAKAO_CLIENT_ID='test-client';runtime.KAKAO_CLIENT_SECRET='test-secret';
+  assert.equal((await f.call('auth/kakao?link=1',null)).status,401);
+  await f.register('teacher','teacher');f.sqlite.prepare("INSERT INTO product_users (id,name,email,created_at) VALUES ('teacher','선생님','',?)").run(timestamp);
+  const start=await f.call('auth/kakao?link=1','teacher');assert.equal(start.status,303);const state=new URL(start.headers.get('location')).searchParams.get('state'),cookie=start.headers.get('set-cookie').split(';')[0];
+  const originalFetch=globalThis.fetch;t.after(()=>{globalThis.fetch=originalFetch;});globalThis.fetch=async url=>Response.json(String(url).includes('/oauth/token')?{access_token:'test-access'}:{id:12345,kakao_account:{email:'teacher@example.test',is_email_verified:true},properties:{nickname:'선생님'}});
+  const done=await f.call(`auth/kakao/callback?code=test-code&state=${state}`,'teacher',undefined,{cookie});assert.equal(done.status,303);assert.equal(done.headers.get('location'),'/account');
+  const settings=await f.ok('account/settings','teacher');assert.equal(settings.links[0].provider,'kakao');assert.equal(settings.preferences.kakao,false);assert.equal(settings.preferences.submissions,false);
 });

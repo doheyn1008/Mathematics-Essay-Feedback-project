@@ -1,3 +1,5 @@
+import { handleLogin } from "./product-login";
+import { handleAccount } from "./product-account";
 import { handleApi } from "./service";
 import { handleProductApi } from "./product-service";
 import { handleProductContributionRoute } from "./product-contributions";
@@ -10,14 +12,16 @@ export async function routeApi(request: Request): Promise<Response> {
     const path = new URL(request.url).pathname.replace(/^\/api\//, "").replace(/\/$/, "");
     if (path.startsWith("product/")) {
       const productPath = path.slice("product/".length);
+      if (productPath.startsWith("auth/")) return await handleLogin(request, productPath.slice(5));
+      if (productPath.startsWith("account/")) return await handleAccount(request, productPath.slice(8), productDatabase());
       if (/^(contributions|premium)(\/|$)/.test(productPath)) {
-        const response = await handleProductContributionRoute(request, productPath, requireProductUser(request), productDatabase());
+        const response = await handleProductContributionRoute(request, productPath, await requireProductUser(request), productDatabase());
         return response ?? productJson({ error: "요청한 기능을 찾을 수 없습니다." }, 404);
       }
       return handleProductApi(request, productPath);
     }
     if (request.method !== "GET") {
-      requireProductUser(request);
+      await requireProductUser(request);
       return productJson({ error: "이전 작업대는 기록 열람용입니다. 시험 작업공간에서 새로 제출하세요.", code: "LEGACY_READ_ONLY" }, 410);
     }
     return handleApi(request);

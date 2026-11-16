@@ -1,3 +1,4 @@
+import { notificationWrites, pointLedger, usageRewardPolicy } from "./product-account";
 import { env } from "cloudflare:workers";
 import type { ClassRoom, Exam, ExamAssignment, ExamFile, ExamFileRole, ExamItem, ExamMessage, ExamSubmission, FeedbackVersion, ProductState, ReleaseMode, SubmissionDetail } from "../product-types";
 import type { Question, Submission } from "../types";
@@ -39,20 +40,9 @@ function validateItems(value: unknown): ExamItem[] {
   const items = value.map(entry => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new HttpError(400, "문항 구조를 확인하세요.");
     const item = entry as Record<string, unknown>;
-    return { id: optionalText(item.id, "문항 ID", 100) || makeId(), label: requireText(item.label, "문항 이름", 150), maxScore: finiteNumber(item.maxScore, "배점", 0.01, 1000), criteria: optionalText(item.criteria, "평가 기준", 10000), ...(item.parentId ? { parentId: requireText(item.parentId, "상위 문항 ID", 100) } : {}) };
+    return { id: optionalText(item.id, "문항 ID", 100) || makeId(), label: requireText(item.label, "문항 이름", 150), maxScore: finiteNumber(item.maxScore, "배점", 0.01, 1000), criteria: optionalText(item.criteria, "평가 기준", 10000) };
   });
   if (new Set(items.map(item => item.id)).size !== items.length) throw new HttpError(400, "문항 ID가 중복됩니다.");
-  for (const item of items) {
-    const visited = new Set<string>([item.id]);
-    let parent = item.parentId;
-    while (parent) {
-      if (visited.has(parent)) throw new HttpError(400, "소문항 구조에 순환이 있습니다.");
-      visited.add(parent);
-      const target = items.find(entry => entry.id === parent);
-      if (!target) throw new HttpError(400, "상위 문항을 찾을 수 없습니다.");
-      parent = target.parentId;
-    }
-  }
   return items;
 }
 
@@ -176,6 +166,11 @@ async function saveExam(request: Request, user: ProductUser): Promise<Response> 
   const profile = await requireProfile(db, user.id, ["teacher", "personal"]);
   await requireEntitlement(db, user.id, profile.accountType === "teacher" ? ["teacher"] : ["personal_basic", "personal_premium"]);
   const { body, files } = await readUpload(request);
+  const createRequestId = optionalText(body.createRequestId, "시험 등록 요청 ID", 100);
+  if (createRequestId && !body.id) {
+    const prior = await db.prepare("SELECT e.data,e.revision FROM product_exam_requests r JOIN product_exams e ON e.id=r.exam_id WHERE r.user_id = ? AND r.request_id = ? AND e.owner_id = ?").bind(user.id,createRequestId,user.id).first<DataRow>();
+    if (prior) return productJson({exam:{...decode<Exam>(prior),revision:prior.revision}},200);
+  }
   const id = optionalText(body.id, "시험 ID", 100) || makeId();
   noLegacy(id);
   const classId = optionalText(body.classId, "반 ID", 100) || null;
@@ -189,23 +184,30 @@ async function saveExam(request: Request, user: ProductUser): Promise<Response> 
   if (files.some(file => file.role === "answer")) throw new HttpError(400, "학생 답안은 시험 자료가 아닌 제출 메뉴에 올리세요.");
   const retainedIds = body.retainedFileIds ?? previous?.files.map(file => file.id) ?? [];
   if (!Array.isArray(retainedIds) || new Set(retainedIds).size !== retainedIds.length || retainedIds.some(id => typeof id !== "string" || !previous?.files.some(file => file.id === id))) throw new HttpError(400, "기존 파일 목록과 중복 여부를 확인하세요.");
-  const retained = retainedIds.map(id => previous!.files.find(file => file.id === id)!);
-  if (retained.some(file => file.itemId && !items.some(item => item.id === file.itemId))) throw new HttpError(400, "기존 파일의 연결 문항을 유지하거나 해당 파일을 교체하세요.");
+  const retained = retainedIds.map(id => { const file = previous!.files.find(file => file.id === id)!; return file.itemId && !items.some(item => item.id === file.itemId) ? {...file,itemId:undefined} : file; });
   if (![...retained, ...files].some(file => file.role === "problem" || file.role === "mixed")) throw new HttpError(400, "문제지 파일을 한 개 이상 등록하세요.");
   if (retained.length + files.length > maximumFiles) throw new HttpError(400, "시험 자료는 최대 12개까지 등록할 수 있습니다.");
   if (retained.reduce((sum, file) => sum + file.size, 0) + files.reduce((sum, entry) => sum + entry.file.size, 0) > maximumTotal) throw new HttpError(413, "시험 자료의 전체 용량은 60MB 이하여야 합니다.");
   const classroom = classId ? await getClass(db, classId) : null;
-  const exam: Exam = { id, ownerId: user.id, classId, title: requireText(body.title, "시험 이름", 200), sourceLabel: requireText(body.sourceLabel, "문제 출처", 500), sourceUrl: sourceUrl(body.sourceUrl), items, files: [], releaseMode: releaseMode(body.releaseMode, classroom?.releaseMode ?? (profile.accountType === "personal" ? "ai_immediate" : "teacher_review")), revision: (previous?.revision ?? 0) + 1, createdAt: previous?.createdAt ?? now(), ...(previous?.originContributionId ? { originContributionId: previous.originContributionId } : {}) };
+  const exam: Exam = { id, ownerId: user.id, classId, title: requireText(body.title, "시험 이름", 200), sourceLabel: body.sourceLabel === undefined ? previous?.sourceLabel ?? "" : optionalText(body.sourceLabel, "문제 출처", 500), sourceUrl: body.sourceUrl === undefined ? previous?.sourceUrl ?? "" : sourceUrl(body.sourceUrl), items, files: [], releaseMode: releaseMode(body.releaseMode, classroom?.releaseMode ?? (profile.accountType === "personal" ? "ai_immediate" : "teacher_review")), revision: (previous?.revision ?? 0) + 1, createdAt: previous?.createdAt ?? now(), ...(previous?.originContributionId ? { originContributionId: previous.originContributionId } : {}) };
   const stored = await storeFiles(files, user.id, id, null);
   exam.files = [...retained, ...stored.files].map((file, order) => ({ ...file, order }));
   try {
     const write = previous ? db.prepare("UPDATE product_exams SET class_id = ?, data = ?, revision = ? WHERE id = ? AND owner_id = ? AND revision = ?").bind(classId, JSON.stringify(exam), exam.revision, id, user.id, previous.revision) : db.prepare("INSERT INTO product_exams (id, owner_id, class_id, data, revision, created_at) VALUES (?, ?, ?, ?, ?, ?)").bind(id, user.id, classId, JSON.stringify(exam), exam.revision, exam.createdAt);
     const fileWrites = stored.files.map((file, index) => db.prepare("INSERT INTO product_files (id, owner_id, exam_id, submission_id, object_key, role, data) SELECT ?, ?, ?, NULL, ?, ?, ? FROM product_exams WHERE id = ? AND revision = ? AND EXISTS (SELECT 1 FROM json_each(product_exams.data, '$.files') f WHERE json_extract(f.value, '$.id') = ?)").bind(file.id, user.id, id, stored.keys[index], file.role, JSON.stringify(file), id, exam.revision, file.id));
-    const writes = await db.batch([write, ...fileWrites]);
+    const requests = !previous && createRequestId ? [db.prepare("INSERT INTO product_exam_requests (user_id,request_id,exam_id) VALUES (?,?,?)").bind(user.id,createRequestId,id)] : [];
+    const writes = await db.batch([write, ...fileWrites, ...requests]);
     if (!writes[0].meta.changes) {
       throw new HttpError(409, "시험이 변경되었습니다. 새로고침 후 다시 저장하세요.", "REVISION_CONFLICT");
     }
-  } catch (error) { await cleanupFiles(stored.keys); throw error; }
+  } catch (error) {
+    await cleanupFiles(stored.keys);
+    if (!previous && createRequestId) {
+      const prior = await db.prepare("SELECT e.data,e.revision FROM product_exam_requests r JOIN product_exams e ON e.id=r.exam_id WHERE r.user_id = ? AND r.request_id = ? AND e.owner_id = ?").bind(user.id,createRequestId,user.id).first<DataRow>();
+      if (prior) return productJson({exam:{...decode<Exam>(prior),revision:prior.revision}},200);
+    }
+    throw error;
+  }
   return productJson({ exam }, previous ? 200 : 201);
 }
 async function createAssignment(body: Record<string, unknown>, user: ProductUser): Promise<Response> {
@@ -330,7 +332,10 @@ async function createSubmission(request: Request, user: ProductUser): Promise<Re
   const writes: D1PreparedStatement[] = [];
   if (createDirectExam) writes.push(db.prepare("INSERT INTO product_exams (id, owner_id, class_id, data, revision, created_at) VALUES (?, ?, NULL, ?, 1, ?)").bind(exam.id, user.id, JSON.stringify(item.exam), timestamp));
   writes.push(db.prepare("INSERT INTO product_submissions (id, student_id, submitted_by, class_id, assignment_id, billing_user_id, data, revision, client_request_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)").bind(item.id, studentId, user.id, classId, assignmentId, billingUserId, JSON.stringify(item), clientRequestId, timestamp), ...stored.statements);
-  try { await db.batch(writes); }
+  try {
+    if (profile.accountType === "academy_student") writes.push(...await notificationWrites(db,item,"submission",`submission:${item.id}`));
+    await db.batch(writes);
+  }
   catch (error) {
     await cleanupFiles(stored.keys);
     const prior = await db.prepare("SELECT data, revision FROM product_submissions WHERE submitted_by = ? AND client_request_id = ?").bind(user.id, clientRequestId).first<DataRow>();
@@ -356,9 +361,11 @@ async function saveReview(id: string, body: Record<string, unknown>, user: Produ
   const timestamp = now();
   const version: FeedbackVersion = { id: makeId(), submissionId: id, version: (item.latestVersion?.version ?? 0) + 1, authorId: user.id, authorName: profile.displayName, authorType: "teacher", createdAt: timestamp, result, teacherReviewed: body.publish, published: body.publish };
   const updated: ExamSubmission = { ...item, latestVersion: version, revision: item.revision + 1, updatedAt: timestamp, visibility: body.publish ? "visible" : item.visibility, reviewStatus: body.publish ? "reviewed" : item.reviewStatus };
+  const notices = body.publish ? await notificationWrites(db,updated,"feedback",`feedback:${version.id}`) : [];
   const writes = await db.batch([
     db.prepare("UPDATE product_submissions SET data = ?, revision = ? WHERE id = ? AND revision = ?").bind(JSON.stringify(updated), updated.revision, id, item.revision),
     db.prepare("INSERT INTO product_versions (id, submission_id, version, published, data, created_at) SELECT ?, ?, ?, ?, ?, ? FROM product_submissions WHERE id = ? AND revision = ? AND json_extract(data, '$.latestVersion.id') = ?").bind(version.id, id, version.version, body.publish ? 1 : 0, JSON.stringify(version), timestamp, id, updated.revision, version.id),
+    ...notices,
   ]);
   if (!writes[0].meta.changes) throw new HttpError(409, "첨삭 기록이 변경되었습니다. 최신 기록을 불러와 주세요.", "REVISION_CONFLICT");
   return productJson({ submission: updated, version });
@@ -380,11 +387,16 @@ export async function ingestAnalysisResult(db: D1Database, id: string, expectedR
   const version: FeedbackVersion = { id: makeId(), submissionId: id, version: (item.latestVersion?.version ?? 0) + 1, authorId: "ai", authorName: "AI 첨삭", authorType: "ai", createdAt: timestamp, result, teacherReviewed: false, published };
   const updated: ExamSubmission = { ...item, latestVersion: version, processing: "completed", visibility: published ? "visible" : item.visibility, reviewStatus: "unreviewed", revision: item.revision + 1, updatedAt: timestamp };
   const usageId = makeId();
+  const notices = published ? await notificationWrites(db,updated,"feedback",`feedback:${version.id}`) : [];
+  const reward = usageRewardPolicy();
+  const rewardWrites: D1PreparedStatement[] = [];
+  if (item.exam.originContributionId && reward.amount !== null && entitlement.plan === "personal_premium") rewardWrites.push(db.prepare("INSERT OR IGNORE INTO product_point_events (id,user_id,contribution_id,learner_id,kind,amount,policy_version,created_at) SELECT ?,c.contributor_id,c.id,?,'usage_reward',?,?,? FROM product_contributions c WHERE c.id = ? AND c.status = 'published' AND c.contributor_id != ? AND EXISTS (SELECT 1 FROM product_usage WHERE id = ?)").bind(makeId(),item.studentId,reward.amount,reward.version,timestamp,item.exam.originContributionId,item.studentId,usageId));
   const writes = await db.batch([
     db.prepare("UPDATE product_submissions SET data = ?, revision = ? WHERE id = ? AND revision = ? AND EXISTS (SELECT 1 FROM product_entitlements WHERE user_id = ? AND status = 'active' AND analysis_limit IS NOT NULL AND used < analysis_limit AND (expires_at IS NULL OR expires_at > ?)) AND (? IS NULL OR EXISTS (SELECT 1 FROM product_classes WHERE id = ? AND json_extract(data, '$.billingTeacherId') = ?))").bind(JSON.stringify(updated), updated.revision, id, item.revision, payer, timestamp, item.classId, item.classId, payer),
     db.prepare("INSERT INTO product_versions (id, submission_id, version, published, data, created_at) SELECT ?, ?, ?, ?, ?, ? FROM product_submissions WHERE id = ? AND revision = ? AND json_extract(data, '$.latestVersion.id') = ?").bind(version.id, id, version.version, published ? 1 : 0, JSON.stringify(version), timestamp, id, updated.revision, version.id),
     db.prepare("INSERT INTO product_usage (id, user_id, submission_id, created_at) SELECT ?, ?, ?, ? FROM product_versions WHERE id = ?").bind(usageId, payer, id, timestamp, version.id),
     db.prepare("UPDATE product_entitlements SET used = used + 1 WHERE user_id = ? AND EXISTS (SELECT 1 FROM product_usage WHERE id = ?)").bind(payer, usageId),
+    ...notices, ...rewardWrites,
   ]);
   if (!writes[0].meta.changes) throw new HttpError(409, "기록 또는 이용권이 변경되었습니다.", "REVISION_CONFLICT");
   return updated;
@@ -477,7 +489,7 @@ async function legacyDetail(db: D1Database, id: string, user: ProductUser): Prom
   return { submission, versions: submission.latestVersion ? [submission.latestVersion] : [], messages: [] };
 }
 async function workspaceState(request: Request): Promise<Response> {
-  const user = productIdentity(request);
+  const user = await productIdentity(request);
   const state: ProductState = { user, profile: null, entitlement: null, classes: [], members: [], exams: [], assignments: [], submissions: [], contributions: [], points: [], capabilities: { storageReady: Boolean(env.DB && env.BUCKET), aiConfigured: false, billingConfigured: false }, policy: { pricesConfigured: false, ...contributionPolicy() } };
   if (!user || !env.DB) return productJson(state);
   const db = productDatabase();
@@ -509,12 +521,13 @@ async function workspaceState(request: Request): Promise<Response> {
   state.submissions.push(...(values[5].results as unknown as (DataRow & { owner_id: string | null })[]).map(row => legacySubmission({ ...decode<Submission>(row), revision: row.revision! }, row.owner_id === user.id)));
   state.exams.push(...(values[6].results as unknown as DataRow[]).map(row => legacyExam({ ...decode<Question>(row), revision: row.revision! })));
   Object.assign(state, await getProductContributions(db, user));
+  state.points = await pointLedger(db,user.id);
   return productJson(state);
 }
 export async function handleProductApi(request: Request, path = new URL(request.url).pathname.replace(/^\/api\/product\/?/, "")): Promise<Response> {
   try {
     if (request.method === "GET" && path === "state") return await workspaceState(request);
-    const user = requireProductUser(request);
+    const user = await requireProductUser(request);
     const db = productDatabase();
     if (request.method === "GET") {
       if (/^files\/[^/]+$/.test(path)) return await fileResponse(db, decodeURIComponent(path.split("/")[1]), user);

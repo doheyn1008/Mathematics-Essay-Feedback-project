@@ -8,7 +8,15 @@ export function productDatabase(): D1Database {
   return env.DB;
 }
 /** Sites dispatch authenticates these headers; never expose this Worker directly. */
-export function productIdentity(request: Request): ProductUser | null {
+export async function productIdentity(request: Request): Promise<ProductUser | null> {
+  const token = request.headers.get("cookie")?.match(/(?:^|;\s*)mg_session=([a-f0-9]{64})(?:;|$)/)?.[1];
+  if (token && env.DB) {
+    const hash = Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token))).toString("hex");
+    const user = await env.DB.prepare("SELECT u.id, u.email, COALESCE(p.display_name,u.name) AS name FROM product_sessions s JOIN product_users u ON u.id = s.user_id LEFT JOIN product_profiles p ON p.user_id=u.id WHERE s.token_hash = ? AND s.expires_at > ?").bind(hash,new Date().toISOString()).first<ProductUser>();
+    if (user) return user;
+  }
+  // Optional legacy ingress identity must be explicitly enabled. Local Sites mock auth is never app login.
+  if ((env as unknown as Record<string, unknown>).PRODUCT_HOST_LOGIN !== "true") return null;
   const id = request.headers.get("oai-authenticated-user-id");
   if (!id) return null;
   const email = request.headers.get("oai-authenticated-user-email") || "";
@@ -18,8 +26,8 @@ export function productIdentity(request: Request): ProductUser | null {
   }
   return { id, email, name: name || email || "사용자" };
 }
-export function requireProductUser(request: Request): ProductUser {
-  const user = productIdentity(request);
+export async function requireProductUser(request: Request): Promise<ProductUser> {
+  const user = await productIdentity(request);
   if (!user) throw new HttpError(401, "로그인 후 이용하세요.", "AUTH_REQUIRED");
   return user;
 }
