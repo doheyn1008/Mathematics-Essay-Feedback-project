@@ -1,3 +1,4 @@
+import { handlePhone, phoneTrial } from "./product-phone";
 import { env } from "cloudflare:workers";
 import type { AccountSettings, ContributionPoint, ExamSubmission, NotificationPreferences } from "../product-types";
 import { checkProductOrigin, getProfile, productJson, readProductJson, requireProductUser } from "./product-auth";
@@ -35,11 +36,12 @@ export async function handleAccount(request: Request, path: string, db: D1Databa
     const row = await db.prepare("SELECT data FROM product_notification_settings WHERE user_id = ?").bind(user.id).first<{data:string}>();
     const links = await db.prepare("SELECT provider,email FROM product_links WHERE user_id = ?").bind(user.id).all<{provider:"google"|"kakao";email:string}>();
     const notifications = await db.prepare("SELECT kind,channel,status,created_at AS createdAt FROM product_notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 30").bind(user.id).all<AccountSettings["notifications"][number]>();
-    const result: AccountSettings = { providers:authProviders(), links:links.results, preferences:row ? JSON.parse(row.data) : defaultPreferences, points:await pointLedger(db,user.id), useReward:usageRewardPolicy(), notifications:notifications.results, deliveryConfigured:false, purchasesConfigured:false };
+    const result: AccountSettings = { phoneTrial:await phoneTrial(db,user.id), providers:authProviders(), links:links.results, preferences:row ? JSON.parse(row.data) : defaultPreferences, points:await pointLedger(db,user.id), useReward:usageRewardPolicy(), notifications:notifications.results, deliveryConfigured:false, purchasesConfigured:false };
     return productJson(result);
   }
   if (request.method !== "POST") throw new HttpError(404,"요청한 기능을 찾을 수 없습니다.");
   checkProductOrigin(request);
+  if (path.startsWith("phone/")) return handlePhone(request,path.slice(6),db,user);
   if (path === "points/purchase") throw new HttpError(503,"포인트 상품과 결제 연결을 준비 중입니다. 결제나 포인트 지급은 실행되지 않았습니다.","PAYMENT_NOT_CONFIGURED");
   if (path !== "settings") throw new HttpError(404,"요청한 기능을 찾을 수 없습니다.");
   const body = await readProductJson(request), prefs: Record<string,boolean> = {};

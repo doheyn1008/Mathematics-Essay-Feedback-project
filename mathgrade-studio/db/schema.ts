@@ -177,3 +177,13 @@ export const productPointEvents = sqliteTable("product_point_events", {
 export const productExamRequests = sqliteTable("product_exam_requests", {
   userId: text("user_id").notNull(), requestId: text("request_id").notNull(), examId: text("exam_id").notNull().references(() => productExams.id),
 }, table => [primaryKey({columns:[table.userId,table.requestId]})]);
+
+export const productPhoneTrials = sqliteTable("product_phone_trials", {
+  userId:text("user_id").primaryKey(), phoneHash:text("phone_hash").notNull(), phoneMasked:text("phone_masked").notNull(), verifiedAt:text("verified_at").notNull(), usedSubmissionId:text("used_submission_id"), consumedAt:text("consumed_at"),
+}, table=>[uniqueIndex("product_trial_phone_unique").on(table.phoneHash),uniqueIndex("product_trial_submission_unique").on(table.usedSubmissionId)]);
+export const productPhoneChallenges = sqliteTable("product_phone_challenges", {
+  id:text("id").primaryKey(), userId:text("user_id").notNull(), phoneHash:text("phone_hash").notNull(), phoneMasked:text("phone_masked").notNull(), providerSid:text("provider_sid").notNull(), serviceSid:text("service_sid").notNull(), expiresAt:text("expires_at").notNull(), attempts:integer("attempts").notNull().default(0), status:text("status").notNull().default("pending"),
+});
+export const productPhoneCooldowns = sqliteTable("product_phone_cooldowns", {
+  userId:text("user_id").primaryKey(), expiresAt:integer("expires_at").notNull(),
+});

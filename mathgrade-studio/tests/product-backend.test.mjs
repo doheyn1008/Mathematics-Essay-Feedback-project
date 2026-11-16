@@ -428,3 +428,91 @@ test('Kakao OAuth links only the current signed-in account without changing noti
   const done=await f.call(`auth/kakao/callback?code=test-code&state=${state}`,'teacher',undefined,{cookie});assert.equal(done.status,303);assert.equal(done.headers.get('location'),'/account');
   const settings=await f.ok('account/settings','teacher');assert.equal(settings.links[0].provider,'kakao');assert.equal(settings.preferences.kakao,false);assert.equal(settings.preferences.submissions,false);
 });
+
+
+function smsProvider(t) {
+  runtime.TWILIO_ACCOUNT_SID='AC'+ 'a'.repeat(32);runtime.TWILIO_AUTH_TOKEN='test-secret';runtime.TWILIO_VERIFY_SERVICE_SID='VA'+'b'.repeat(32);runtime.PHONE_IDENTITY_SECRET='test-only-private-phone-key-32-characters';
+  const old=globalThis.fetch;t.after(()=>{globalThis.fetch=old;});const calls=[],verifications=new Map();let count=0;
+  globalThis.fetch=async(url,options)=>{
+    const params=new URLSearchParams(options.body);calls.push({url:String(url),params});
+    if(String(url).endsWith('/Verifications')){const sid='VE'+(++count).toString(16).padStart(32,'0');verifications.set(sid,params.get('To'));return Response.json({sid,to:params.get('To'),status:'pending',service_sid:runtime.TWILIO_VERIFY_SERVICE_SID});}
+    const sid=params.get('VerificationSid');return Response.json({sid,to:verifications.get(sid),status:params.get('Code')==='123456'?'approved':'pending'});
+  };
+  return {calls,verifications};
+}
+async function phoneStart(f,user,phone='010-1234-5678') {return f.ok('account/phone/start',user,{phone,consent:true});}
+async function phoneVerify(f,user,challengeId,code='123456') {return f.call('account/phone/verify',user,{challengeId,code});}
+function trialGrant(f,user){f.sqlite.prepare('INSERT INTO product_phone_trials (user_id,phone_hash,phone_masked,verified_at) VALUES (?,?,?,?)').run(user,`test-hash-${user}`,'010-****-5678',timestamp);}
+async function trialSubmission(f,user,key){return (await f.ok('submissions',user,f.form({usePhoneTrial:true,title:'무료 첨삭 시험',question:'풀이가 타당한가요?',clientRequestId:key},[{role:'problem'},{role:'answer'}]),201)).submission;}
+
+test('phone trial stays unverified without an SMS provider and cannot be granted by a browser flag',async t=>{
+  const f=fixture(t);await f.register('teacher','teacher');
+  const settings=await f.ok('account/settings','teacher');assert.equal(settings.phoneTrial.configured,false);assert.equal(settings.phoneTrial.remaining,0);
+  assert.equal((await f.call('account/phone/start','teacher',{phone:'01012345678',consent:true})).value.code,'PHONE_NOT_CONFIGURED');
+  assert.equal((await f.call('account/phone/verify','teacher',{verified:true,phone:'01012345678',code:'123456'})).value.code,'PHONE_NOT_CONFIGURED');
+  assert.equal((await f.call('submissions','teacher',f.form({usePhoneTrial:true,title:'시험',clientRequestId:'no-verify'},[{role:'problem'},{role:'answer'}]))).value.code,'PHONE_VERIFICATION_REQUIRED');
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM product_phone_trials').get().n,0);
+});
+
+test('verified phone grants one free analysis to every fixed account type without granting a paid plan',async t=>{
+  const f=fixture(t);const provider=smsProvider(t);let number=10;
+  for(const role of ['teacher','academy_student','personal']) {
+    await f.register(role,role);const phone=`010123456${number++}`;const start=await phoneStart(f,role,phone);
+    assert.ok(start.challengeId);const verified=await phoneVerify(f,role,start.challengeId);assert.equal(verified.status,200);assert.equal(verified.value.trial.remaining,1);
+    const again=await phoneVerify(f,role,start.challengeId);assert.equal(again.status,200);assert.equal(again.value.trial.remaining,1);
+    const state=await f.ok('state',role);assert.equal(state.profile.accountType,role);assert.equal(state.entitlement,null);assert.equal(state.phoneTrial.remaining,1);
+    const sub=await trialSubmission(f,role,`trial-${role}`);assert.equal(sub.funding,'phone_trial');assert.equal(sub.classId,null);assert.equal(sub.billingUserId,role);
+    const ai=await f.call(`submissions/${sub.id}/analyze`,role,{revision:1});assert.equal(ai.value.code,'AI_NOT_CONFIGURED');assert.equal((await f.ok('state',role)).phoneTrial.remaining,1);
+    await ingestAnalysisResult(f.db,sub.id,1,result());assert.equal((await f.ok('state',role)).phoneTrial.remaining,0);
+    const replay=await phoneVerify(f,role,start.challengeId);assert.equal(replay.value.trial.remaining,0);
+    assert.equal((await f.ok(`submissions/${sub.id}`,role)).submission.latestVersion.published,true);
+  }
+  assert.equal(provider.calls.filter(c=>c.url.endsWith('/Verifications')).length,3);
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM product_entitlements').get().n,0);
+});
+
+test('phone normalization and unique grants prevent repeat claims across accounts, concurrent checks, or phone changes',async t=>{
+  const f=fixture(t);smsProvider(t);await f.register('one','teacher');await f.register('two','personal');
+  const first=await phoneStart(f,'one','010-1234-5678'),second=await phoneStart(f,'two','+82 10 1234 5678');
+  const checked=await Promise.all([phoneVerify(f,'one',first.challengeId),phoneVerify(f,'two',second.challengeId)]);
+  assert.deepEqual(checked.map(c=>c.status).sort(),[200,409]);assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM product_phone_trials').get().n,1);
+  const owner=checked[0].status===200?'one':'two';
+  const changed=await phoneStart(f,owner,'010-9876-5432');assert.equal(changed.alreadyVerified,true);
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM product_phone_trials').get().n,1);
+  const privateRows=JSON.stringify(f.sqlite.prepare('SELECT * FROM product_phone_challenges').all());assert.equal(privateRows.includes('+821012345678'),false);assert.equal(privateRows.includes('123456"'),false);
+});
+
+test('SMS consent, server cooldown, challenge ownership, expiration and attempt limits are enforced',async t=>{
+  const f=fixture(t);const provider=smsProvider(t);await f.register('one','teacher');await f.register('two','personal');
+  assert.equal((await f.call('account/phone/start','one',{phone:'01012345678',consent:false})).status,400);
+  const sends=await Promise.all([f.call('account/phone/start','one',{phone:'01012345678',consent:true}),f.call('account/phone/start','one',{phone:'01012345678',consent:true})]);assert.deepEqual(sends.map(s=>s.status).sort(),[200,429]);
+  assert.equal(provider.calls.length,1);const id=sends.find(s=>s.status===200).value.challengeId;
+  assert.equal((await phoneVerify(f,'two',id)).status,400);assert.equal(provider.calls.length,1);
+  for(let i=0;i<5;i++)assert.equal((await phoneVerify(f,'one',id,'111111')).value.code,'PHONE_CODE_INVALID');
+  assert.equal((await phoneVerify(f,'one',id)).value.code,'PHONE_CHALLENGE_EXPIRED');assert.equal(provider.calls.length,6);
+  const another=await phoneStart(f,'two','01087654321');f.sqlite.prepare('UPDATE product_phone_challenges SET expires_at=? WHERE id=?').run('2000-01-01T00:00:00.000Z',another.challengeId);
+  assert.equal((await phoneVerify(f,'two',another.challengeId)).value.code,'PHONE_CHALLENGE_EXPIRED');
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM product_phone_trials').get().n,0);
+});
+
+test('free trial results and the single credit commit atomically, including simultaneous submissions',async t=>{
+  const f=fixture(t);await f.register('teacher','teacher');trialGrant(f,'teacher');
+  const first=await trialSubmission(f,'teacher','first-free'),second=await trialSubmission(f,'teacher','second-free');
+  await assert.rejects(()=>ingestAnalysisResult(f.db,first.id,1,{items:[]}));assert.equal((await f.ok('state','teacher')).phoneTrial.remaining,1);
+  f.sqlite.exec("CREATE TRIGGER reject_free_usage BEFORE INSERT ON product_usage BEGIN SELECT RAISE(ABORT,'usage failure'); END;");
+  await assert.rejects(()=>ingestAnalysisResult(f.db,first.id,1,result()));assert.equal((await f.ok('state','teacher')).phoneTrial.remaining,1);assert.equal((await f.ok(`submissions/${first.id}`,'teacher')).versions.length,0);
+  f.sqlite.exec('DROP TRIGGER reject_free_usage');
+  const outcomes=await Promise.allSettled([ingestAnalysisResult(f.db,first.id,1,result()),ingestAnalysisResult(f.db,second.id,1,result())]);
+  assert.equal(outcomes.filter(x=>x.status==='fulfilled').length,1);assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM product_versions').get().n,1);assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM product_usage').get().n,1);
+  assert.equal((await f.ok('state','teacher')).phoneTrial.remaining,0);
+  assert.equal((await f.call('submissions','teacher',f.form({usePhoneTrial:true,title:'다시',clientRequestId:'third-free'},[{role:'problem'},{role:'answer'}]))).value.code,'FREE_TRIAL_USED');
+});
+
+test('free trial cannot access premium materials, class proxy submissions or change paid quotas',async t=>{
+  const f=fixture(t);const {work}=await f.base();trialGrant(f,'teacher');
+  assert.equal((await f.call('submissions','teacher',f.form({usePhoneTrial:true,assignmentId:work.id,studentId:'student',clientRequestId:'proxy-free'},[{role:'answer'}]))).status,400);
+  assert.equal((await f.call('submissions','teacher',f.form({usePhoneTrial:true,examId:work.exam.id,clientRequestId:'premium-free'},[{role:'answer'}]))).status,400);
+  const sub=await trialSubmission(f,'teacher','paid-owner-free');await ingestAnalysisResult(f.db,sub.id,1,result());
+  assert.equal((await f.ok('state','teacher')).entitlement.used,0);assert.equal((await f.ok('state','teacher')).phoneTrial.remaining,0);
+  assert.equal((await f.call(`submissions/${sub.id}`,'outsider')).status,403);
+});

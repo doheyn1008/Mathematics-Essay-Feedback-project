@@ -1,3 +1,4 @@
+import { phoneTrial, requirePhoneTrial } from "./product-phone";
 import { notificationWrites, pointLedger, usageRewardPolicy } from "./product-account";
 import { env } from "cloudflare:workers";
 import type { ClassRoom, Exam, ExamAssignment, ExamFile, ExamFileRole, ExamItem, ExamMessage, ExamSubmission, FeedbackVersion, ProductState, ReleaseMode, SubmissionDetail } from "../product-types";
@@ -277,6 +278,9 @@ async function createSubmission(request: Request, user: ProductUser): Promise<Re
   if (files.some(file => file.role === "solution" || file.role === "rubric")) throw new HttpError(400, "답지와 채점기준은 선생님의 시험 자료 등록에서 추가하세요.");
   const assignmentId = optionalText(body.assignmentId, "과제 ID", 100) || null;
   const suppliedExamId = optionalText(body.examId, "시험 ID", 100) || null;
+  const useTrial = body.usePhoneTrial === true;
+  if (useTrial && (assignmentId || suppliedExamId)) throw new HttpError(400, "무료 체험에는 직접 가져온 문제와 답안만 제출하세요.");
+  if (useTrial) await requirePhoneTrial(db,user.id);
   if (assignmentId && suppliedExamId) throw new HttpError(400, "배정된 과제와 개인 시험 중 하나를 선택하세요.");
   let classId: string | null = null;
   let studentId = user.id;
@@ -309,8 +313,8 @@ async function createSubmission(request: Request, user: ProductUser): Promise<Re
     exam = assignment.exam;
     if (files.some(file => file.role === "problem")) throw new HttpError(400, "과제의 문제지는 이미 등록되어 있습니다. 답안 또는 문제·답안 혼합 파일로 제출하세요.");
   } else {
-    if (profile.accountType !== "personal") throw new HttpError(403, "학원 제출은 반에 배정된 시험을 선택하세요.", "ASSIGNMENT_REQUIRED");
-    await requireEntitlement(db, user.id, ["personal_basic", "personal_premium"]);
+    if (!useTrial && profile.accountType !== "personal") throw new HttpError(403, "학원 제출은 반에 배정된 시험을 선택하세요.", "ASSIGNMENT_REQUIRED");
+    if (!useTrial) await requireEntitlement(db, user.id, ["personal_basic", "personal_premium"]);
     if (body.classId || (body.studentId && body.studentId !== user.id)) throw new HttpError(403, "개인 계정은 본인 시험만 제출할 수 있습니다.");
     if (suppliedExamId) {
       noLegacy(suppliedExamId);
@@ -319,12 +323,12 @@ async function createSubmission(request: Request, user: ProductUser): Promise<Re
       if (exam.originContributionId) await requireEntitlement(db, user.id, ["personal_premium"]);
     } else {
       if (!files.some(file => file.role === "problem" || file.role === "mixed")) throw new HttpError(400, "문제 파일과 답안 파일을 함께 첨부하세요. 한 파일이면 문제·답안 혼합으로 선택하세요.");
-      exam = { id: makeId(), ownerId: user.id, classId: null, title: requireText(body.title, "시험 이름", 200), sourceLabel: requireText(body.sourceLabel, "문제 출처", 500), sourceUrl: sourceUrl(body.sourceUrl), items: [], files: [], releaseMode: "ai_immediate", revision: 1, createdAt: timestamp };
+      exam = { id: makeId(), ownerId: user.id, classId: null, title: requireText(body.title, "시험 이름", 200), sourceLabel: useTrial ? optionalText(body.sourceLabel, "문제 출처", 500) : requireText(body.sourceLabel, "문제 출처", 500), sourceUrl: sourceUrl(body.sourceUrl), items: [], files: [], releaseMode: "ai_immediate", revision: 1, createdAt: timestamp };
       createDirectExam = true;
     }
   }
   checkFileItems(files, exam.items);
-  const item: ExamSubmission = { id: makeId(), studentId, studentName, submittedBy: user.id, classId, assignmentId, billingUserId, exam, files: [], question: optionalText(body.question, "궁금한 점", 10000), processing: "not_configured", visibility: "private", reviewStatus: "unreviewed", releaseMode: exam.releaseMode, latestVersion: null, revision: 1, createdAt: timestamp, updatedAt: timestamp };
+  const item: ExamSubmission = { ...(useTrial ? {funding:"phone_trial" as const} : {}), id: makeId(), studentId, studentName, submittedBy: user.id, classId, assignmentId, billingUserId, exam, files: [], question: optionalText(body.question, "궁금한 점", 10000), processing: "not_configured", visibility: "private", reviewStatus: "unreviewed", releaseMode: exam.releaseMode, latestVersion: null, revision: 1, createdAt: timestamp, updatedAt: timestamp };
   // Direct problems are tied to their saved exam as well as the submission, so future use retains the original.
   const stored = await storeFiles(files, user.id, createDirectExam ? exam.id : null, item.id);
   item.files = stored.files;
@@ -376,11 +380,14 @@ export async function ingestAnalysisResult(db: D1Database, id: string, expectedR
   revision(expectedRevision, item.revision);
   const previousUsage = await db.prepare("SELECT id FROM product_usage WHERE submission_id = ?").bind(id).first();
   if (previousUsage) throw new HttpError(409, "이미 완료된 AI 요청입니다.", "ANALYSIS_ALREADY_COMPLETED");
-  const payer = item.classId ? await classPayer(db, item.classId) : item.studentId;
+  const isTrial = item.funding === "phone_trial";
+  if (isTrial && (item.classId || item.assignmentId || item.exam.originContributionId || item.submittedBy !== item.studentId)) throw new HttpError(403,"무료 체험 제출 정보를 확인하세요.");
+  if (isTrial) await requirePhoneTrial(db,item.submittedBy);
+  const payer = isTrial ? item.submittedBy : item.classId ? await classPayer(db, item.classId) : item.studentId;
   if (payer !== item.billingUserId) throw new HttpError(409, "제출 후 이용권 담당이 변경되었습니다. 새 요청으로 확인해야 합니다.", "BILLING_CHANGED");
-  const entitlement = await requireEntitlement(db, payer, item.classId ? ["teacher"] : ["personal_basic", "personal_premium"]);
-  if (entitlement.analysisLimit === null) throw new HttpError(503, "첨삭 제공 횟수 정책이 아직 설정되지 않았습니다.", "USAGE_POLICY_NOT_CONFIGURED");
-  if (entitlement.used >= entitlement.analysisLimit) throw new HttpError(429, "이용권의 첨삭 횟수를 모두 사용했습니다.", "USAGE_LIMIT_REACHED");
+  const entitlement = isTrial ? null : await requireEntitlement(db, payer, item.classId ? ["teacher"] : ["personal_basic", "personal_premium"]);
+  if (entitlement && entitlement.analysisLimit === null) throw new HttpError(503, "첨삭 제공 횟수 정책이 아직 설정되지 않았습니다.", "USAGE_POLICY_NOT_CONFIGURED");
+  if (entitlement && entitlement.used >= entitlement.analysisLimit!) throw new HttpError(429, "이용권의 첨삭 횟수를 모두 사용했습니다.", "USAGE_LIMIT_REACHED");
   const result = validateExamResult(rawResult, item, true);
   const timestamp = now();
   const published = item.releaseMode === "ai_immediate";
@@ -390,12 +397,18 @@ export async function ingestAnalysisResult(db: D1Database, id: string, expectedR
   const notices = published ? await notificationWrites(db,updated,"feedback",`feedback:${version.id}`) : [];
   const reward = usageRewardPolicy();
   const rewardWrites: D1PreparedStatement[] = [];
-  if (item.exam.originContributionId && reward.amount !== null && entitlement.plan === "personal_premium") rewardWrites.push(db.prepare("INSERT OR IGNORE INTO product_point_events (id,user_id,contribution_id,learner_id,kind,amount,policy_version,created_at) SELECT ?,c.contributor_id,c.id,?,'usage_reward',?,?,? FROM product_contributions c WHERE c.id = ? AND c.status = 'published' AND c.contributor_id != ? AND EXISTS (SELECT 1 FROM product_usage WHERE id = ?)").bind(makeId(),item.studentId,reward.amount,reward.version,timestamp,item.exam.originContributionId,item.studentId,usageId));
+  if (item.exam.originContributionId && reward.amount !== null && entitlement?.plan === "personal_premium") rewardWrites.push(db.prepare("INSERT OR IGNORE INTO product_point_events (id,user_id,contribution_id,learner_id,kind,amount,policy_version,created_at) SELECT ?,c.contributor_id,c.id,?,'usage_reward',?,?,? FROM product_contributions c WHERE c.id = ? AND c.status = 'published' AND c.contributor_id != ? AND EXISTS (SELECT 1 FROM product_usage WHERE id = ?)").bind(makeId(),item.studentId,reward.amount,reward.version,timestamp,item.exam.originContributionId,item.studentId,usageId));
+  const update = isTrial
+    ? db.prepare("UPDATE product_submissions SET data = ?, revision = ? WHERE id = ? AND revision = ? AND EXISTS (SELECT 1 FROM product_phone_trials WHERE user_id = ? AND used_submission_id IS NULL)").bind(JSON.stringify(updated),updated.revision,id,item.revision,payer)
+    : db.prepare("UPDATE product_submissions SET data = ?, revision = ? WHERE id = ? AND revision = ? AND EXISTS (SELECT 1 FROM product_entitlements WHERE user_id = ? AND status = 'active' AND analysis_limit IS NOT NULL AND used < analysis_limit AND (expires_at IS NULL OR expires_at > ?)) AND (? IS NULL OR EXISTS (SELECT 1 FROM product_classes WHERE id = ? AND json_extract(data, '$.billingTeacherId') = ?))").bind(JSON.stringify(updated), updated.revision, id, item.revision, payer, timestamp, item.classId, item.classId, payer);
+  const debit = isTrial
+    ? db.prepare("UPDATE product_phone_trials SET used_submission_id = ?, consumed_at = ? WHERE user_id = ? AND used_submission_id IS NULL AND EXISTS (SELECT 1 FROM product_usage WHERE id = ?)").bind(id,timestamp,payer,usageId)
+    : db.prepare("UPDATE product_entitlements SET used = used + 1 WHERE user_id = ? AND EXISTS (SELECT 1 FROM product_usage WHERE id = ?)").bind(payer,usageId);
   const writes = await db.batch([
-    db.prepare("UPDATE product_submissions SET data = ?, revision = ? WHERE id = ? AND revision = ? AND EXISTS (SELECT 1 FROM product_entitlements WHERE user_id = ? AND status = 'active' AND analysis_limit IS NOT NULL AND used < analysis_limit AND (expires_at IS NULL OR expires_at > ?)) AND (? IS NULL OR EXISTS (SELECT 1 FROM product_classes WHERE id = ? AND json_extract(data, '$.billingTeacherId') = ?))").bind(JSON.stringify(updated), updated.revision, id, item.revision, payer, timestamp, item.classId, item.classId, payer),
+    update,
     db.prepare("INSERT INTO product_versions (id, submission_id, version, published, data, created_at) SELECT ?, ?, ?, ?, ?, ? FROM product_submissions WHERE id = ? AND revision = ? AND json_extract(data, '$.latestVersion.id') = ?").bind(version.id, id, version.version, published ? 1 : 0, JSON.stringify(version), timestamp, id, updated.revision, version.id),
     db.prepare("INSERT INTO product_usage (id, user_id, submission_id, created_at) SELECT ?, ?, ?, ? FROM product_versions WHERE id = ?").bind(usageId, payer, id, timestamp, version.id),
-    db.prepare("UPDATE product_entitlements SET used = used + 1 WHERE user_id = ? AND EXISTS (SELECT 1 FROM product_usage WHERE id = ?)").bind(payer, usageId),
+    debit,
     ...notices, ...rewardWrites,
   ]);
   if (!writes[0].meta.changes) throw new HttpError(409, "기록 또는 이용권이 변경되었습니다.", "REVISION_CONFLICT");
@@ -407,7 +420,10 @@ async function analyze(id: string, body: Record<string, unknown>, user: ProductU
   const item = await fetchSubmission(db, id);
   await submissionAccess(db, item, user.id);
   revision(body.revision, item.revision);
-  if (item.classId) await classPayer(db, item.classId);
+  if (item.funding === "phone_trial") {
+    if (item.submittedBy !== user.id) throw new HttpError(403,"본인의 무료 체험만 이용할 수 있습니다.");
+    await requirePhoneTrial(db,user.id);
+  } else if (item.classId) await classPayer(db, item.classId);
   else { await requireProfile(db, user.id, ["personal"]); await requireEntitlement(db, user.id, ["personal_basic", "personal_premium"]); }
   // All originals and the optional question are ready in one bundle. No fabricated provider success.
   prepareAnalysisInput(item);
@@ -522,6 +538,7 @@ async function workspaceState(request: Request): Promise<Response> {
   state.exams.push(...(values[6].results as unknown as DataRow[]).map(row => legacyExam({ ...decode<Question>(row), revision: row.revision! })));
   Object.assign(state, await getProductContributions(db, user));
   state.points = await pointLedger(db,user.id);
+  state.phoneTrial = await phoneTrial(db,user.id);
   return productJson(state);
 }
 export async function handleProductApi(request: Request, path = new URL(request.url).pathname.replace(/^\/api\/product\/?/, "")): Promise<Response> {
