@@ -10,11 +10,13 @@ export class ApiError extends Error {
   }
 }
 
-export async function api<T>(path: string, body?: unknown): Promise<T> {
+export async function api<T>(path: string, body?: unknown, options?: { signal?: AbortSignal }): Promise<T> {
   const isForm = body instanceof FormData;
   const response = await fetch(path, {
     method: body === undefined ? "GET" : "POST",
     credentials: "same-origin",
+    cache: "no-store",
+    signal: options?.signal,
     headers: isForm || body === undefined ? undefined : { "Content-Type": "application/json" },
     body: body === undefined ? undefined : isForm ? body : JSON.stringify(body),
   });

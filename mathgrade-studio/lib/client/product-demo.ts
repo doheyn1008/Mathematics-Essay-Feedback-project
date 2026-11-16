@@ -46,6 +46,8 @@ export class ProductDemo {
   state: ProductState;
   details: Record<string, SubmissionDetail> = {};
   private requests = new Map<string, string>();
+  private messageRequests = new Map<string, string>();
+  private materialRequests = new Map<string, string>();
   private originalFiles = new Map<string, File>();
   private contributionHashes = new Map<string, string>();
   constructor() {
@@ -93,7 +95,8 @@ export class ProductDemo {
     data.members = data.members.filter(member => member.userId === person.id || teacherClasses.has(member.classId));
     data.assignments = data.assignments.filter(assignment => classIds.has(assignment.classId)).map(assignment => teacherClasses.has(assignment.classId) ? assignment : { ...assignment, exam: studentExam(assignment.exam) });
     data.submissions = data.submissions.filter(submission => submission.studentId === person.id || (!!submission.classId && teacherClasses.has(submission.classId))).map(submission => this.detail(submission.id).submission);
-    data.exams = data.exams.filter(exam => exam.ownerId === person.id || (!!exam.classId && teacherClasses.has(exam.classId)));
+    data.exams = data.exams.filter(exam => !exam.deletedAt && (exam.ownerId === person.id || (!!exam.classId && teacherClasses.has(exam.classId))));
+    data.departures=(data.departures??[]).filter(d=>teacherClasses.has(d.classId));
     data.contributions = person.role === "teacher" ? data.contributions.filter(contribution => contribution.contributorId === person.id) : [];
     data.points = person.role === "teacher" ? data.points.filter(point => data.contributions.some(contribution => contribution.id === point.contributionId)) : [];
     return data;
@@ -103,7 +106,7 @@ export class ProductDemo {
     if (!this.teacherFor(detail.submission.classId)) {
       detail.versions = detail.versions.filter(version => version.published);
       const latest = [...detail.versions].sort((a, b) => b.version - a.version)[0] ?? null;
-      detail.submission = { ...detail.submission, exam: studentExam(detail.submission.exam), latestVersion: latest, visibility: latest ? "visible" : "private", reviewStatus: latest?.teacherReviewed ? "reviewed" : "unreviewed" };
+      detail.submission = { ...detail.submission, exam: studentExam(detail.submission.exam), latestVersion: latest, visibility: latest ? "visible" : "private", reviewStatus: latest?.teacherReviewed && (latest.materialVersion??1)===(detail.submission.materialVersion??1) ? "reviewed" : "unreviewed" };
     }
     detail.versions.sort((a, b) => b.version - a.version);
     return detail;
@@ -150,6 +153,8 @@ export class ProductDemo {
       const code = text(body.code, "참여 코드", 40, true).toUpperCase();
       const classroom = this.state.classes.find(entry => (person.role === "teacher" ? entry.teacherCode : entry.studentCode) === code);
       if (!classroom) fail("계정 유형에 맞는 반 참여 코드를 확인하세요.", 404);
+      if(classroom.archivedAt)fail("보관한 반은 참여할 수 없습니다.",409,"CLASS_ARCHIVED");
+      if(this.state.departures?.some(d=>d.classId===classroom.id&&d.userId===person.id&&d.status==="removed"))fail("선생님이 재참여를 허용해야 합니다.",403,"CLASS_REENTRY_BLOCKED");
       if (!this.state.members.some(member => member.classId === classroom.id && member.userId === person.id)) this.state.members.push({ classId: classroom.id, userId: person.id, role: person.role === "teacher" ? "teacher" : "student", displayName: person.name, joinedAt: now() });
       return { classroom: person.role === "teacher" ? structuredClone(classroom) : { ...structuredClone(classroom), teacherCode: undefined, studentCode: undefined } };
     }
@@ -158,7 +163,55 @@ export class ProductDemo {
       const payer = text(body.billingTeacherId, "이용권 담당자", 100, true);
       if (payer !== classroom.billingTeacherId && payer !== person.id) fail("비용을 부담할 선생님이 직접 수락해야 합니다.", 403);
       if (!this.state.members.some(member => member.classId === classroom.id && member.userId === payer && member.role === "teacher")) fail("담당 반의 선생님을 지정하세요.", 403);
-      Object.assign(classroom, { billingTeacherId: payer, releaseMode: release(body.releaseMode, classroom.releaseMode) }); return { classroom: structuredClone(classroom) };
+      if(classroom.archivedAt)fail("보관한 반은 변경할 수 없습니다.",409,"CLASS_ARCHIVED");
+      Object.assign(classroom, { name:body.name===undefined?classroom.name:text(body.name,"반 이름",100,true), billingTeacherId: payer, releaseMode: release(body.releaseMode, classroom.releaseMode) }); return { classroom: structuredClone(classroom) };
+    }
+    const classManagement=path.match(/^classes\/([^/]+)\/(leave|remove|readmit|archive)$/);
+    if(classManagement){
+      const [,classId,operation]=classManagement,room=this.classroom(classId),member=this.state.members.find(m=>m.classId===classId&&m.userId===person.id);
+      if(!member)fail("참여한 반만 관리할 수 있습니다.",403);
+      if(operation==="archive"){this.requireTeacher(classId);room.archivedAt=room.archivedAt??now();return {classroom:structuredClone(room)};}
+      if(operation==="remove"||operation==="readmit"){
+        this.requireTeacher(classId);if(room.archivedAt)fail("보관한 반입니다.",409);
+        const studentId=text(body.studentId,"학생",100,true);
+        if(operation==="readmit"){this.state.departures=(this.state.departures??[]).filter(d=>d.classId!==classId||d.userId!==studentId);return {ok:true};}
+        const target=this.state.members.find(m=>m.classId===classId&&m.userId===studentId&&m.role==="student");if(!target)fail("반 학생을 선택하세요.",404);
+        this.state.members=this.state.members.filter(m=>m!==target);
+        this.state.departures=[...(this.state.departures??[]).filter(d=>d.classId!==classId||d.userId!==studentId),{classId,userId:studentId,status:"removed",displayName:target.displayName}];return {ok:true};
+      }
+      if(member.role==="teacher"&&!room.archivedAt&&(room.billingTeacherId===person.id||this.state.members.filter(m=>m.classId===classId&&m.role==="teacher").length<2))fail("담당·비용 부담을 인계하거나 반을 보관하세요.",409,"CLASS_HANDOVER_REQUIRED");
+      this.state.members=this.state.members.filter(m=>m!==member);return {ok:true};
+    }
+    const examManagement=path.match(/^exams\/([^/]+)\/(archive|restore|delete)$/);
+    if(examManagement){
+      const [,examId,operation]=examManagement,exam=this.state.exams.find(e=>e.id===examId);if(!exam||exam.ownerId!==person.id)fail("본인의 시험만 관리하세요.",403);
+      if(exam.classId)this.requireTeacher(exam.classId);checkRevision(body.revision,exam.revision);
+      if(exam.deletedAt)fail("삭제한 시험입니다.",409);
+      if(operation==="delete"&&(this.state.assignments.some(a=>a.exam.id===exam.id)||this.state.submissions.some(s=>s.exam.id===exam.id)||this.state.contributions.some(c=>c.sourceExamId===exam.id)))fail("사용한 시험은 보관하세요.",409,"EXAM_IN_USE");
+      exam.revision++;exam.archivedAt=operation==="restore"?undefined:now();if(operation==="delete")exam.deletedAt=now();return {exam:structuredClone(exam)};
+    }
+    const assignmentManagement=path.match(/^assignments\/([^/]+)\/(settings|cancel)$/);
+    if(assignmentManagement){
+      const [,assignmentId,operation]=assignmentManagement,assignment=this.state.assignments.find(a=>a.id===assignmentId);if(!assignment)fail("과제를 찾을 수 없습니다.",404);
+      this.requireTeacher(assignment.classId);checkRevision(body.revision,assignment.revision??1);
+      if(this.classroom(assignment.classId).archivedAt||assignment.cancelledAt)fail("보관·취소한 과제입니다.",409);
+      if(operation==="cancel")assignment.cancelledAt=now();else{const due=text(body.dueAt,"마감일",100);if(due&&!Number.isFinite(Date.parse(due)))fail("마감일을 확인하세요.");assignment.title=text(body.title,"과제 이름",200,true);assignment.dueAt=due?new Date(due).toISOString():null;}
+      assignment.revision=(assignment.revision??1)+1;return {assignment:structuredClone(assignment)};
+    }
+    if(/^submissions\/[^/]+\/materials$/.test(path)){
+      const detail=this.access(path.split("/")[1]),submission=detail.submission;
+      if(submission.classId){const room=this.classroom(submission.classId);if(room.archivedAt)fail("보관한 반입니다.",409,"CLASS_ARCHIVED");if(!this.state.members.some(m=>m.classId===room.id&&m.userId===person.id))fail("현재 반 소속만 수정할 수 있습니다.",403);}
+      if(this.state.assignments.find(a=>a.id===submission.assignmentId)?.cancelledAt)fail("취소한 과제입니다.",409,"ASSIGNMENT_CANCELLED");
+      const key=`${person.id}:${text(body.clientRequestId,"수정 요청",100,true)}`,prior=this.materialRequests.get(key);if(prior)return {submission:this.detail(submission.id).submission};
+      const base=body.revision;checkRevision(base,submission.revision);
+      const retainedIds=body.retainedFileIds;if(!Array.isArray(retainedIds)||new Set(retainedIds).size!==retainedIds.length||retainedIds.some(id=>!submission.files.some(f=>f.id===id)))fail("기존 자료를 확인하세요.");
+      const files=await uploaded();checkRevision(base,submission.revision);matchItems(files,submission.exam.items);
+      if(files.some(f=>f.role!=="answer"&&f.role!=="mixed"))fail("답안 또는 혼합 파일만 추가하세요.");
+      const next=[...submission.files.filter(f=>retainedIds.includes(f.id)),...files];if(!next.some(f=>f.role==="answer"||f.role==="mixed"))fail("답안을 한 개 이상 남기세요.");if(next.length>12||next.reduce((sum,f)=>sum+f.size,0)>60*1024*1024)fail("제출 용량을 확인하세요.");
+      const snapshot=()=>({id:id(),submissionId:submission.id,version:submission.materialVersion??1,files:structuredClone(submission.files),question:submission.question,authorId:person.id,createdAt:now()});
+      if(!detail.materials?.length)detail.materials=[snapshot()];
+      Object.assign(submission,{files:next.map((f,order)=>({...f,order})),question:text(body.question,"질문",10000),materialVersion:(submission.materialVersion??1)+1,revision:submission.revision+1,processing:"not_configured",reviewStatus:"unreviewed",updatedAt:now()});
+      detail.materials.unshift(snapshot());this.materialRequests.set(key,submission.id);return {submission:this.detail(submission.id).submission};
     }
     if (path === "exams") {
       if (person.role === "academy_student") fail("학생은 시험 자료를 등록할 수 없습니다.", 403);
@@ -166,12 +219,13 @@ export class ProductDemo {
       const previous = this.state.exams.find(exam => exam.id === examId);
       if (previous && previous.ownerId !== person.id) fail("본인이 등록한 시험만 변경할 수 있습니다.", 403);
       if (previous) checkRevision(body.revision, previous.revision);
+      if(previous?.archivedAt||previous?.deletedAt)fail("보관하거나 삭제한 시험은 수정할 수 없습니다.",409);
       const classId = text(body.classId, "반 ID", 100) || null; if (classId) this.requireTeacher(classId);
       const items = itemsInput(body.items); const files = await uploaded(); matchItems(files, items);
       if (files.some(file => file.role === "answer")) fail("학생 답안은 제출 메뉴에 올리세요.");
       const retainedIds = body.retainedFileIds ?? previous?.files.map(file => file.id) ?? [];
       if (!Array.isArray(retainedIds) || retainedIds.some(value => typeof value !== "string" || !previous?.files.some(file => file.id === value))) fail("기존 파일 목록을 확인하세요.");
-      const retained = previous?.files.filter(file => retainedIds.includes(file.id)) ?? []; matchItems(retained, items);
+      const retained = (previous?.files.filter(file => retainedIds.includes(file.id)) ?? []).map(file=>file.itemId&&!items.some(item=>item.id===file.itemId)?{...file,itemId:undefined}:file);
       if (![...retained, ...files].some(file => file.role === "problem" || file.role === "mixed")) fail("문제지 파일을 한 개 이상 등록하세요.");
       if (retained.length + files.length > 12) fail("시험 자료는 12개까지 등록할 수 있습니다.");
       const exam: Exam = { id: examId, ownerId: person.id, classId, title: text(body.title, "시험 이름", 200, true), sourceLabel: body.sourceLabel === undefined ? previous?.sourceLabel ?? "" : text(body.sourceLabel, "문제 출처", 500), sourceUrl: body.sourceUrl === undefined ? previous?.sourceUrl ?? "" : sourceUrl(body.sourceUrl), items, files: [...retained, ...files].map((file, order) => ({ ...file, order })), releaseMode: release(body.releaseMode, classId ? this.classroom(classId).releaseMode : person.role === "personal" ? "ai_immediate" : "teacher_review"), revision: (previous?.revision ?? 0) + 1, createdAt: previous?.createdAt ?? now(), ...(previous?.originContributionId ? { originContributionId: previous.originContributionId } : {}) };
@@ -180,6 +234,7 @@ export class ProductDemo {
     if (path === "assignments") {
       const classId = text(body.classId, "반 ID", 100, true); this.requireTeacher(classId);
       const exam = this.state.exams.find(entry => entry.id === body.examId); if (!exam) fail("시험을 선택하세요.", 404);
+      if(exam.archivedAt||exam.deletedAt||this.classroom(classId).archivedAt)fail("보관한 시험·반에는 배정할 수 없습니다.",409);
       if ((exam.ownerId !== person.id && exam.classId !== classId) || (exam.classId && exam.classId !== classId)) fail("담당 반의 시험만 배정할 수 있습니다.", 403);
       if (!exam.files.some(file => file.role === "problem" || file.role === "mixed")) fail("문제 자료를 등록한 후 배정하세요.");
       const due = text(body.dueAt, "마감일", 100); if (due && !Number.isFinite(Date.parse(due))) fail("마감일을 확인하세요.");
@@ -195,6 +250,8 @@ export class ProductDemo {
       let exam: Exam; let studentId = person.id; let studentName = person.name; let classId: string | null = null; let billingUserId = person.id; let direct = false;
       if (body.assignmentId) {
         if (!assignment) fail("배정된 시험을 찾을 수 없습니다.", 404);
+        if(assignment.cancelledAt)fail("배정이 취소된 과제입니다.",409,"ASSIGNMENT_CANCELLED");
+        if(this.classroom(assignment.classId).archivedAt)fail("보관한 반입니다.",409,"CLASS_ARCHIVED");
         if (person.role === "personal") fail("개인 계정에서는 학원 과제를 제출할 수 없습니다.", 403);
         classId = assignment.classId; if (body.classId && body.classId !== classId) fail("선택한 반과 과제가 일치하지 않습니다.");
         const member = this.state.members.find(entry => entry.classId === classId && entry.userId === person.id); if (!member) fail("참여한 반의 시험만 제출할 수 있습니다.", 403);
@@ -207,10 +264,10 @@ export class ProductDemo {
         if (person.role !== "personal") fail("학원 제출은 배정된 과제를 선택하세요.", 403);
         if (body.classId || (body.studentId && body.studentId !== person.id)) fail("본인 개인 시험만 제출할 수 있습니다.", 403);
         if (body.examId) { const existing = this.state.exams.find(entry => entry.id === body.examId); if (!existing || existing.ownerId !== person.id || existing.classId) fail("본인 개인 학습공간의 시험만 선택하세요.", 403); if (existing.originContributionId) this.requirePremium(); exam = structuredClone(existing); }
-        else { if (!files.some(file => file.role === "problem" || file.role === "mixed")) fail("문제와 답안 파일을 함께 첨부하세요."); exam = { id: id(), ownerId: person.id, classId: null, title: text(body.title, "시험 이름", 200, true), sourceLabel: text(body.sourceLabel, "문제 출처", 500, true), sourceUrl: sourceUrl(body.sourceUrl), items: [], files: files.filter(file => file.role === "problem" || file.role === "mixed"), releaseMode: "ai_immediate", revision: 1, createdAt: now() }; direct = true; }
+        else { if (!files.some(file => file.role === "problem" || file.role === "mixed")) fail("문제와 답안 파일을 함께 첨부하세요."); exam = { id: id(), ownerId: person.id, classId: null, title: text(body.title, "시험 이름", 200, true), sourceLabel: text(body.sourceLabel, "문제 출처", 500), sourceUrl: sourceUrl(body.sourceUrl), items: [], files: files.filter(file => file.role === "problem" || file.role === "mixed"), releaseMode: "ai_immediate", revision: 1, createdAt: now() }; direct = true; }
       }
       matchItems(files, exam.items);
-      const submission: ExamSubmission = { id: id(), studentId, studentName, submittedBy: person.id, classId, assignmentId: assignment?.id ?? null, billingUserId, exam: structuredClone(exam), files, question: text(body.question, "궁금한 점", 10000), processing: "not_configured", visibility: "private", reviewStatus: "unreviewed", releaseMode: exam.releaseMode, latestVersion: null, revision: 1, createdAt: now(), updatedAt: now() };
+      const submission: ExamSubmission = { materialVersion:1, id: id(), studentId, studentName, submittedBy: person.id, classId, assignmentId: assignment?.id ?? null, billingUserId, exam: structuredClone(exam), files, question: text(body.question, "궁금한 점", 10000), processing: "not_configured", visibility: "private", reviewStatus: "unreviewed", releaseMode: exam.releaseMode, latestVersion: null, revision: 1, createdAt: now(), updatedAt: now() };
       if (direct) this.state.exams.unshift(structuredClone(exam));
       this.state.submissions.unshift(submission); this.details[submission.id] = { submission, versions: [], messages: [] }; this.requests.set(requestKey, submission.id); return { submission: this.detail(submission.id).submission };
     }
@@ -221,12 +278,15 @@ export class ProductDemo {
         this.requireTeacher(detail.submission.classId); checkRevision(body.revision, detail.submission.revision);
         if (typeof body.publish !== "boolean") fail("공개 여부를 확인하세요.");
         const result = validateExamResult(body.result, detail.submission, body.publish);
-        const version: FeedbackVersion = { id: id(), submissionId, version: Math.max(0, ...detail.versions.map(entry => entry.version)) + 1, authorId: person.id, authorName: person.name, authorType: "teacher", result, teacherReviewed: body.publish, published: body.publish, createdAt: now() };
+        const version: FeedbackVersion = { id: id(), submissionId, version: Math.max(0, ...detail.versions.map(entry => entry.version)) + 1, authorId: person.id, authorName: person.name, authorType: "teacher", materialVersion:detail.submission.materialVersion??1, result, teacherReviewed: body.publish, published: body.publish, createdAt: now() };
         detail.versions.push(version); Object.assign(detail.submission, { latestVersion: version, revision: detail.submission.revision + 1, visibility: body.publish ? "visible" : detail.submission.visibility, reviewStatus: body.publish ? "reviewed" : detail.submission.reviewStatus, updatedAt: now() }); return { submission: structuredClone(detail.submission) };
       }
+      if(!detail.submission.classId||this.classroom(detail.submission.classId).archivedAt||!this.state.members.some(m=>m.classId===detail.submission.classId&&m.userId===person.id))fail("현재 반 소속만 대화를 전송할 수 있습니다.",403);
+      const messageKey=`${submissionId}:${person.id}:${text(body.clientRequestId,"메시지 요청",100)||id()}`;
+      const duplicateMessage=this.messageRequests.get(messageKey);if(duplicateMessage)return {message:structuredClone(detail.messages.find(m=>m.id===duplicateMessage))};
       const itemId = text(body.itemId, "관련 문항", 100) || null;
       if (itemId && !detail.submission.exam.items.some(item => item.id === itemId) && !detail.submission.latestVersion?.result.items.some(item => item.itemId === itemId)) fail("해당 시험의 문항을 선택하세요.");
-      const message = { id: id(), submissionId, authorId: person.id, authorName: person.name, authorRole: this.teacherFor(detail.submission.classId) ? "teacher" as const : "student" as const, itemId, text: text(body.text, "대화 내용", 10000, true), createdAt: now() }; detail.messages.push(message); return { message: structuredClone(message) };
+      const message = { id: id(), submissionId, authorId: person.id, authorName: person.name, authorRole: this.teacherFor(detail.submission.classId) ? "teacher" as const : "student" as const, itemId, text: text(body.text, "대화 내용", 10000, true), createdAt: now() }; detail.messages.push(message); this.messageRequests.set(messageKey,message.id); return { message: structuredClone(message) };
     }
     if (path === "contributions") {
       this.requireTeacher();

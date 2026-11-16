@@ -12,13 +12,14 @@ export async function productIdentity(request: Request): Promise<ProductUser | n
   const token = request.headers.get("cookie")?.match(/(?:^|;\s*)mg_session=([a-f0-9]{64})(?:;|$)/)?.[1];
   if (token && env.DB) {
     const hash = Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token))).toString("hex");
-    const user = await env.DB.prepare("SELECT u.id, u.email, COALESCE(p.display_name,u.name) AS name FROM product_sessions s JOIN product_users u ON u.id = s.user_id LEFT JOIN product_profiles p ON p.user_id=u.id WHERE s.token_hash = ? AND s.expires_at > ?").bind(hash,new Date().toISOString()).first<ProductUser>();
+    const user = await env.DB.prepare("SELECT u.id, u.email, COALESCE(p.display_name,u.name) AS name FROM product_sessions s JOIN product_users u ON u.id = s.user_id LEFT JOIN product_profiles p ON p.user_id=u.id WHERE s.token_hash = ? AND s.expires_at > ? AND NOT EXISTS (SELECT 1 FROM product_closed_accounts c WHERE c.user_id=u.id)").bind(hash,new Date().toISOString()).first<ProductUser>();
     if (user) return user;
   }
   // Optional legacy ingress identity must be explicitly enabled. Local Sites mock auth is never app login.
   if ((env as unknown as Record<string, unknown>).PRODUCT_HOST_LOGIN !== "true") return null;
   const id = request.headers.get("oai-authenticated-user-id");
   if (!id) return null;
+  if (env.DB && await env.DB.prepare("SELECT user_id FROM product_closed_accounts WHERE user_id=?").bind(id).first()) return null;
   const email = request.headers.get("oai-authenticated-user-email") || "";
   let name = request.headers.get("oai-authenticated-user-full-name") || "";
   if (request.headers.get("oai-authenticated-user-full-name-encoding") === "percent-encoded-utf-8") {

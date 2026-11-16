@@ -63,7 +63,8 @@ function checkedVersion(detail: SubmissionDetail) {
 /** Render only the version and files returned by the authorized report endpoint. */
 export async function generateExamFeedbackPdf(detail: SubmissionDetail, options: ExamPdfOptions = {}): Promise<Uint8Array> {
   const version = checkedVersion(detail);
-  const submission = detail.submission;
+  const original=detail.materials?.find(m=>m.version===(version.materialVersion??1));
+  const submission=original ? {...detail.submission,files:original.files,question:original.question,materialVersion:original.version} : detail.submission;
   const result = version.result;
   const generatedAt = options.generatedAt ?? new Date();
   if (!Number.isFinite(generatedAt.getTime())) throw new Error("출력 생성 일시를 확인하세요.");
@@ -260,6 +261,7 @@ export async function generateExamFeedbackPdf(detail: SubmissionDetail, options:
   }
 
   heading("자료 연결과 출처");
+  write(`이 첨삭의 기준 자료: v${version.materialVersion??1} · 현재 제출 자료: v${detail.submission.materialVersion??1}`,9,MUTED,4);
   write(submission.exam.sourceLabel || "사용자 제출 자료", 9, MUTED, 4);
   if (submission.exam.sourceUrl) write(submission.exam.sourceUrl, 8.5, MUTED, 5);
   const files = [...submission.exam.files, ...submission.files].filter((file, index, all) => all.findIndex(other => other.id === file.id) === index);

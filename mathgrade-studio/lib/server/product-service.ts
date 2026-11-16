@@ -1,4 +1,5 @@
 import { phoneTrial, requirePhoneTrial } from "./product-phone";
+import { handleManagement, managedClass, requireActiveClass, requireCurrentStudent } from "./product-management";
 import { notificationWrites, pointLedger, usageRewardPolicy } from "./product-account";
 import { env } from "cloudflare:workers";
 import type { ClassRoom, Exam, ExamAssignment, ExamFile, ExamFileRole, ExamItem, ExamMessage, ExamSubmission, FeedbackVersion, ProductState, ReleaseMode, SubmissionDetail } from "../product-types";
@@ -147,6 +148,9 @@ async function joinClass(body: Record<string, unknown>, user: ProductUser): Prom
   const row = await db.prepare(teacher ? "SELECT data FROM product_classes WHERE teacher_code = ?" : "SELECT data FROM product_classes WHERE student_code = ?").bind(code).first<DataRow>();
   if (!row) throw new HttpError(404, "계정 유형에 맞는 반 참여 코드를 확인하세요.");
   const classroom = decode<ClassRoom>(row);
+  requireActiveClass(classroom);
+  const departure = await db.prepare("SELECT status FROM product_departures WHERE class_id=? AND user_id=?").bind(classroom.id,user.id).first<{status:string}>();
+  if (departure?.status === "removed") throw new HttpError(403,"선생님이 재참여를 허용한 뒤 같은 코드로 참여할 수 있습니다.","CLASS_REENTRY_BLOCKED");
   await db.prepare("INSERT OR IGNORE INTO product_members (class_id, user_id, role, display_name, joined_at) VALUES (?, ?, ?, ?, ?)").bind(classroom.id, user.id, teacher ? "teacher" : "student", profile.displayName, now()).run();
   return productJson({ classroom: teacher ? classroom : { ...classroom, teacherCode: undefined, studentCode: undefined } });
 }
@@ -154,12 +158,16 @@ async function settingsClass(id: string, body: Record<string, unknown>, user: Pr
   const db = productDatabase();
   await requireClassTeacher(db, id, user.id, true);
   const classroom = await getClass(db, id);
+  requireActiveClass(classroom);
   const payer = requireText(body.billingTeacherId, "이용권 담당 선생님", 100);
   // Only the selected payer may accept billing responsibility, never another teacher's credits.
   if (payer !== classroom.billingTeacherId && payer !== user.id) throw new HttpError(403, "이용권 담당 변경은 비용을 부담할 선생님 본인이 수락해야 합니다.", "BILLING_CONSENT_REQUIRED");
   await requireClassTeacher(db, id, payer, true);
-  const updated = { ...classroom, billingTeacherId: payer, releaseMode: releaseMode(body.releaseMode, classroom.releaseMode) };
-  await db.prepare("UPDATE product_classes SET data = ? WHERE id = ?").bind(JSON.stringify(updated), id).run();
+  const updated = { ...classroom, name: body.name === undefined ? classroom.name : requireText(body.name,"반 이름",100), billingTeacherId: payer, releaseMode: releaseMode(body.releaseMode, classroom.releaseMode) };
+  const updates=[db.prepare("UPDATE product_classes SET data = ? WHERE id = ? AND data=? AND EXISTS (SELECT 1 FROM product_members WHERE class_id=? AND user_id=? AND role='teacher') AND EXISTS (SELECT 1 FROM product_members WHERE class_id=? AND user_id=? AND role='teacher')").bind(JSON.stringify(updated),id,JSON.stringify(classroom),id,user.id,id,payer)];
+  if (payer!==classroom.billingTeacherId) updates.push(db.prepare("UPDATE product_submissions SET billing_user_id=?,data=json_set(data,'$.billingUserId',?,'$.revision',revision+1,'$.updatedAt',?),revision=revision+1 WHERE class_id=? AND billing_user_id=? AND NOT EXISTS (SELECT 1 FROM product_usage u WHERE u.submission_id=product_submissions.id) AND EXISTS (SELECT 1 FROM product_classes WHERE id=? AND data=?)").bind(payer,payer,now(),id,classroom.billingTeacherId,id,JSON.stringify(updated)));
+  const writes=await db.batch(updates);
+  if (!writes[0].meta.changes) throw new HttpError(409,"반 설정이나 담당자가 변경되었습니다.","REVISION_CONFLICT");
   return productJson({ classroom: updated });
 }
 async function saveExam(request: Request, user: ProductUser): Promise<Response> {
@@ -179,6 +187,8 @@ async function saveExam(request: Request, user: ProductUser): Promise<Response> 
   const row = await db.prepare("SELECT data, revision FROM product_exams WHERE id = ?").bind(id).first<DataRow>();
   const previous = row ? { ...decode<Exam>(row), revision: row.revision! } : null;
   if (previous && previous.ownerId !== user.id) throw new HttpError(403, "직접 등록한 시험만 변경할 수 있습니다.");
+  if (previous?.archivedAt || previous?.deletedAt) throw new HttpError(409,"보관하거나 삭제한 시험은 수정할 수 없습니다.");
+  if (classId) requireActiveClass(await getClass(db,classId));
   if (previous) revision(body.revision, previous.revision);
   const items = validateItems(body.items);
   checkFileItems(files, items);
@@ -216,6 +226,8 @@ async function createAssignment(body: Record<string, unknown>, user: ProductUser
   const classId = requireText(body.classId, "반 ID", 100);
   await requireClassTeacher(db, classId, user.id, true);
   const exam = await getExam(db, requireText(body.examId, "시험 ID", 100));
+  requireActiveClass(await getClass(db,classId));
+  if (exam.archivedAt || exam.deletedAt) throw new HttpError(409,"보관하거나 삭제한 시험은 새로 배정할 수 없습니다.");
   if (exam.ownerId !== user.id && exam.classId !== classId) throw new HttpError(403, "본인 또는 담당 반의 시험만 배정할 수 있습니다.");
   if (exam.classId && exam.classId !== classId) throw new HttpError(403, "다른 반에 등록된 시험을 바로 배정할 수 없습니다.");
   if (!exam.files.some(file => file.role === "problem" || file.role === "mixed")) throw new HttpError(400, "문제 자료를 등록한 후 배정하세요.");
@@ -239,11 +251,11 @@ async function submissionAccess(db: D1Database, item: ExamSubmission, userId: st
   if (item.studentId === userId) return "student";
   throw new HttpError(403, "이 학생의 시험 기록에 접근할 수 없습니다.", "SUBMISSION_ACCESS_DENIED");
 }
-async function visibleSubmission(db: D1Database, item: ExamSubmission, teacher: boolean): Promise<ExamSubmission> {
+async function visibleSubmission(db: D1Database, item: ExamSubmission, teacher: boolean, publishedBySubmission?:Map<string,FeedbackVersion>): Promise<ExamSubmission> {
   if (teacher) return item;
-  const published = await db.prepare("SELECT data FROM product_versions WHERE submission_id = ? AND published = 1 ORDER BY version DESC LIMIT 1").bind(item.id).first<DataRow>();
-  const latestVersion = published ? decode<FeedbackVersion>(published) : null;
-  return { ...item, exam: studentExam(item.exam), latestVersion, visibility: latestVersion ? "visible" : "private", reviewStatus: latestVersion?.teacherReviewed ? "reviewed" : "unreviewed" };
+  const published = publishedBySubmission ? null : await db.prepare("SELECT data FROM product_versions WHERE submission_id = ? AND published = 1 ORDER BY version DESC LIMIT 1").bind(item.id).first<DataRow>();
+  const latestVersion = publishedBySubmission ? publishedBySubmission.get(item.id)??null : published ? decode<FeedbackVersion>(published) : null;
+  return { ...item, exam: studentExam(item.exam), latestVersion, visibility: latestVersion ? "visible" : "private", reviewStatus: latestVersion?.teacherReviewed && (latestVersion.materialVersion??1)===(item.materialVersion??1) ? "reviewed" : "unreviewed" };
 }
 async function getDetail(db: D1Database, id: string, user: ProductUser): Promise<SubmissionDetail> {
   if (id.startsWith("legacy:")) return legacyDetail(db, id.slice(7), user);
@@ -252,12 +264,16 @@ async function getDetail(db: D1Database, id: string, user: ProductUser): Promise
   const teacher = access === "teacher";
   const [versions, messages] = await db.batch([
     db.prepare(teacher ? "SELECT data FROM product_versions WHERE submission_id = ? ORDER BY version DESC" : "SELECT data FROM product_versions WHERE submission_id = ? AND published = 1 ORDER BY version DESC").bind(id),
-    db.prepare("SELECT data FROM product_messages WHERE submission_id = ? ORDER BY created_at, id").bind(id),
+    db.prepare("SELECT rowid AS sequence,data FROM product_messages WHERE submission_id = ? ORDER BY rowid").bind(id),
   ]);
-  return { submission: await visibleSubmission(db, item, teacher), versions: (versions.results as unknown as DataRow[]).map(decode<FeedbackVersion>), messages: (messages.results as unknown as DataRow[]).map(decode<ExamMessage>) };
+  const materialRows=await db.prepare("SELECT data FROM product_submission_materials WHERE submission_id=? ORDER BY version DESC").bind(id).all<DataRow>();
+  const materials=materialRows.results.map(decode<import("../product-types").SubmissionMaterial>);
+  if (!materials.length) materials.push(materialSnapshot(item));
+  return { submission: await visibleSubmission(db, item, teacher), versions: (versions.results as unknown as DataRow[]).map(decode<FeedbackVersion>), messages: (messages.results as unknown as (DataRow & {sequence:number})[]).map(row=>({...decode<ExamMessage>(row),sequence:row.sequence})), materials };
 }
 async function classPayer(db: D1Database, classId: string): Promise<string> {
   const classroom = await getClass(db, classId);
+  requireActiveClass(classroom);
   if (!classroom.billingTeacherId) throw new HttpError(409, "반의 이용권 담당 선생님을 먼저 지정해야 합니다.", "BILLING_TEACHER_REQUIRED");
   try { await requireClassTeacher(db, classId, classroom.billingTeacherId, true); }
   catch { throw new HttpError(402, "이 반에 지정된 선생님의 이용권을 확인해야 합니다. 학원 학생에게는 별도 요금을 부과하지 않습니다.", "CLASS_ENTITLEMENT_REQUIRED"); }
@@ -295,6 +311,7 @@ async function createSubmission(request: Request, user: ProductUser): Promise<Re
     const assignmentRow = await db.prepare("SELECT data FROM product_assignments WHERE id = ?").bind(assignmentId).first<DataRow>();
     if (!assignmentRow) throw new HttpError(404, "배정된 시험을 찾을 수 없습니다.");
     const assignment = decode<ExamAssignment>(assignmentRow);
+    if (assignment.cancelledAt) throw new HttpError(409,"배정이 취소된 과제에는 새 답안을 제출할 수 없습니다.","ASSIGNMENT_CANCELLED");
     classId = assignment.classId;
     if (body.classId && body.classId !== classId) throw new HttpError(400, "선택한 반과 과제가 일치하지 않습니다.");
     const member = await classMembership(db, classId, user.id);
@@ -319,16 +336,17 @@ async function createSubmission(request: Request, user: ProductUser): Promise<Re
     if (suppliedExamId) {
       noLegacy(suppliedExamId);
       exam = await getExam(db, suppliedExamId);
+      if (exam.archivedAt || exam.deletedAt) throw new HttpError(409,"보관하거나 삭제한 시험은 새로 제출할 수 없습니다.");
       if (exam.ownerId !== user.id || exam.classId) throw new HttpError(403, "본인 개인 학습공간의 시험만 선택할 수 있습니다.");
       if (exam.originContributionId) await requireEntitlement(db, user.id, ["personal_premium"]);
     } else {
       if (!files.some(file => file.role === "problem" || file.role === "mixed")) throw new HttpError(400, "문제 파일과 답안 파일을 함께 첨부하세요. 한 파일이면 문제·답안 혼합으로 선택하세요.");
-      exam = { id: makeId(), ownerId: user.id, classId: null, title: requireText(body.title, "시험 이름", 200), sourceLabel: useTrial ? optionalText(body.sourceLabel, "문제 출처", 500) : requireText(body.sourceLabel, "문제 출처", 500), sourceUrl: sourceUrl(body.sourceUrl), items: [], files: [], releaseMode: "ai_immediate", revision: 1, createdAt: timestamp };
+      exam = { id: makeId(), ownerId: user.id, classId: null, title: requireText(body.title, "시험 이름", 200), sourceLabel: optionalText(body.sourceLabel, "문제 출처", 500), sourceUrl: sourceUrl(body.sourceUrl), items: [], files: [], releaseMode: "ai_immediate", revision: 1, createdAt: timestamp };
       createDirectExam = true;
     }
   }
   checkFileItems(files, exam.items);
-  const item: ExamSubmission = { ...(useTrial ? {funding:"phone_trial" as const} : {}), id: makeId(), studentId, studentName, submittedBy: user.id, classId, assignmentId, billingUserId, exam, files: [], question: optionalText(body.question, "궁금한 점", 10000), processing: "not_configured", visibility: "private", reviewStatus: "unreviewed", releaseMode: exam.releaseMode, latestVersion: null, revision: 1, createdAt: timestamp, updatedAt: timestamp };
+  const item: ExamSubmission = { materialVersion:1, ...(useTrial ? {funding:"phone_trial" as const} : {}), id: makeId(), studentId, studentName, submittedBy: user.id, classId, assignmentId, billingUserId, exam, files: [], question: optionalText(body.question, "궁금한 점", 10000), processing: "not_configured", visibility: "private", reviewStatus: "unreviewed", releaseMode: exam.releaseMode, latestVersion: null, revision: 1, createdAt: timestamp, updatedAt: timestamp };
   // Direct problems are tied to their saved exam as well as the submission, so future use retains the original.
   const stored = await storeFiles(files, user.id, createDirectExam ? exam.id : null, item.id);
   item.files = stored.files;
@@ -352,18 +370,65 @@ async function createSubmission(request: Request, user: ProductUser): Promise<Re
   }
   return productJson({ submission: await visibleSubmission(db, item, profile.accountType === "teacher") }, 201);
 }
+function materialSnapshot(item: ExamSubmission): import("../product-types").SubmissionMaterial {
+  return {id:`${item.id}:materials:${item.materialVersion ?? 1}`,submissionId:item.id,version:item.materialVersion ?? 1,files:item.files,question:item.question,authorId:item.submittedBy,createdAt:item.updatedAt};
+}
+async function reviseMaterials(request:Request,id:string,user:ProductUser):Promise<Response> {
+  noLegacy(id);
+  const db=productDatabase(),item=await fetchSubmission(db,id),access=await submissionAccess(db,item,user.id);
+  if (item.classId) {
+    requireActiveClass(await getClass(db,item.classId));
+    if (access === "student") await requireCurrentStudent(db,item.classId,user.id);
+    if (item.assignmentId) {
+      const row=await db.prepare("SELECT data FROM product_assignments WHERE id=?").bind(item.assignmentId).first<DataRow>();
+      if (!row || decode<ExamAssignment>(row).cancelledAt) throw new HttpError(409,"배정이 취소된 과제는 기록 열람만 가능합니다.","ASSIGNMENT_CANCELLED");
+    }
+  }
+  const {body,files}=await readUpload(request);
+  const requestId=requireText(body.clientRequestId,"수정 요청 ID",100);
+  const prior=await db.prepare("SELECT data FROM product_submission_materials WHERE id=? AND submission_id=?").bind(`${user.id}:${requestId}`,id).first<DataRow>();
+  if (prior) return productJson({submission:await visibleSubmission(db,item,access === "teacher"),material:decode(prior)});
+  revision(body.revision,item.revision);
+  if (files.some(f=>f.role !== "answer" && f.role !== "mixed")) throw new HttpError(400,"답안 또는 문제·답안 혼합 파일만 추가하세요. 등록된 문제는 보존됩니다.");
+  checkFileItems(files,item.exam.items);
+  const ids=body.retainedFileIds;
+  if (!Array.isArray(ids) || new Set(ids).size!==ids.length || ids.some(id=>typeof id !== "string" || !item.files.some(f=>f.id===id))) throw new HttpError(400,"유지할 제출 파일을 확인하세요.");
+  const retained=ids.map(id=>item.files.find(f=>f.id===id)!);
+  if (![...retained,...files].some(f=>f.role === "answer" || f.role === "mixed")) throw new HttpError(400,"답안을 한 개 이상 남겨 주세요.");
+  if (retained.length+files.length>maximumFiles || retained.reduce((sum,f)=>sum+f.size,0)+files.reduce((sum,f)=>sum+f.file.size,0)>maximumTotal) throw new HttpError(413,"제출 자료는 최대 12개, 전체 60MB까지 가능합니다.");
+  const stored=await storeFiles(files,user.id,null,id),at=now();
+  const updated:ExamSubmission={...item,materialId:`${user.id}:${requestId}`,files:[...retained,...stored.files].map((f,order)=>({...f,order})),question:optionalText(body.question,"궁금한 점",10000),materialVersion:(item.materialVersion ?? 1)+1,revision:item.revision+1,processing:"not_configured",reviewStatus:"unreviewed",updatedAt:at};
+  const old=materialSnapshot(item),material={...materialSnapshot(updated),id:`${user.id}:${requestId}`,authorId:user.id,createdAt:at};
+  try {
+    const guard="EXISTS (SELECT 1 FROM product_submissions WHERE id=? AND revision=? AND json_extract(data,'$.materialVersion')=? AND json_extract(data,'$.materialId')=?)";
+    const writes=await db.batch([
+      db.prepare("UPDATE product_submissions SET data=?,revision=? WHERE id=? AND revision=? AND (class_id IS NULL OR EXISTS (SELECT 1 FROM product_members m JOIN product_classes c ON c.id=m.class_id WHERE m.class_id=product_submissions.class_id AND m.user_id=? AND json_extract(c.data,'$.archivedAt') IS NULL)) AND (assignment_id IS NULL OR EXISTS (SELECT 1 FROM product_assignments a WHERE a.id=product_submissions.assignment_id AND json_extract(a.data,'$.cancelledAt') IS NULL))").bind(JSON.stringify(updated),updated.revision,id,item.revision,user.id),
+      db.prepare(`INSERT OR IGNORE INTO product_submission_materials (id,submission_id,version,data,created_at) SELECT ?,?,?,?,? WHERE ${guard}`).bind(old.id,id,old.version,JSON.stringify(old),old.createdAt,id,updated.revision,updated.materialVersion!,material.id),
+      db.prepare(`INSERT INTO product_submission_materials (id,submission_id,version,data,created_at) SELECT ?,?,?,?,? WHERE ${guard}`).bind(material.id,id,material.version,JSON.stringify(material),at,id,updated.revision,updated.materialVersion!,material.id),
+      ...stored.files.map((f,i)=>db.prepare(`INSERT INTO product_files (id,owner_id,submission_id,object_key,role,data) SELECT ?,?,?,?,?,? WHERE ${guard} AND EXISTS (SELECT 1 FROM json_each((SELECT data FROM product_submissions WHERE id=?),'$.files') WHERE json_extract(value,'$.id')=?)`).bind(f.id,user.id,id,stored.keys[i],f.role,JSON.stringify(f),id,updated.revision,updated.materialVersion!,material.id,id,f.id)),
+    ]);
+    if (!writes[0].meta.changes) throw new HttpError(409,"제출 자료가 변경되었습니다. 입력은 유지하고 최신 기록을 확인하세요.","REVISION_CONFLICT");
+  } catch (error) {
+    await cleanupFiles(stored.keys);
+    const duplicate=await db.prepare("SELECT data FROM product_submission_materials WHERE id=? AND submission_id=?").bind(material.id,id).first<DataRow>();
+    if (duplicate) return productJson({submission:await visibleSubmission(db,await fetchSubmission(db,id),access === "teacher"),material:decode(duplicate)});
+    throw error;
+  }
+  return productJson({submission:await visibleSubmission(db,updated,access === "teacher"),material});
+}
 async function saveReview(id: string, body: Record<string, unknown>, user: ProductUser): Promise<Response> {
   noLegacy(id);
   const db = productDatabase();
   const item = await fetchSubmission(db, id);
   if (!item.classId) throw new HttpError(403, "담당 반의 시험만 선생님 첨삭을 추가할 수 있습니다.");
   await requireClassTeacher(db, item.classId, user.id, true);
+  requireActiveClass(await getClass(db,item.classId));
   revision(body.revision, item.revision);
   if (typeof body.publish !== "boolean") throw new HttpError(400, "임시 저장 또는 확정 공개를 선택하세요.");
   const result = validateExamResult(body.result, item, body.publish);
   const profile = await requireProfile(db, user.id, ["teacher"]);
   const timestamp = now();
-  const version: FeedbackVersion = { id: makeId(), submissionId: id, version: (item.latestVersion?.version ?? 0) + 1, authorId: user.id, authorName: profile.displayName, authorType: "teacher", createdAt: timestamp, result, teacherReviewed: body.publish, published: body.publish };
+  const version: FeedbackVersion = { id: makeId(), submissionId: id, version: (item.latestVersion?.version ?? 0) + 1, authorId: user.id, authorName: profile.displayName, authorType: "teacher", materialVersion:item.materialVersion ?? 1, createdAt: timestamp, result, teacherReviewed: body.publish, published: body.publish };
   const updated: ExamSubmission = { ...item, latestVersion: version, revision: item.revision + 1, updatedAt: timestamp, visibility: body.publish ? "visible" : item.visibility, reviewStatus: body.publish ? "reviewed" : item.reviewStatus };
   const notices = body.publish ? await notificationWrites(db,updated,"feedback",`feedback:${version.id}`) : [];
   const writes = await db.batch([
@@ -378,6 +443,7 @@ async function saveReview(id: string, body: Record<string, unknown>, user: Produ
 export async function ingestAnalysisResult(db: D1Database, id: string, expectedRevision: number, rawResult: unknown): Promise<ExamSubmission> {
   const item = await fetchSubmission(db, id);
   revision(expectedRevision, item.revision);
+  if ((item.materialVersion ?? 1)>1) throw new HttpError(409,"수정 자료의 AI 재첨삭·비용 정책을 준비 중입니다. 기존 결과는 보존됩니다.","MATERIAL_REANALYSIS_POLICY_PENDING");
   const previousUsage = await db.prepare("SELECT id FROM product_usage WHERE submission_id = ?").bind(id).first();
   if (previousUsage) throw new HttpError(409, "이미 완료된 AI 요청입니다.", "ANALYSIS_ALREADY_COMPLETED");
   const isTrial = item.funding === "phone_trial";
@@ -391,7 +457,7 @@ export async function ingestAnalysisResult(db: D1Database, id: string, expectedR
   const result = validateExamResult(rawResult, item, true);
   const timestamp = now();
   const published = item.releaseMode === "ai_immediate";
-  const version: FeedbackVersion = { id: makeId(), submissionId: id, version: (item.latestVersion?.version ?? 0) + 1, authorId: "ai", authorName: "AI 첨삭", authorType: "ai", createdAt: timestamp, result, teacherReviewed: false, published };
+  const version: FeedbackVersion = { id: makeId(), submissionId: id, version: (item.latestVersion?.version ?? 0) + 1, authorId: "ai", authorName: "AI 첨삭", authorType: "ai", materialVersion:item.materialVersion ?? 1, createdAt: timestamp, result, teacherReviewed: false, published };
   const updated: ExamSubmission = { ...item, latestVersion: version, processing: "completed", visibility: published ? "visible" : item.visibility, reviewStatus: "unreviewed", revision: item.revision + 1, updatedAt: timestamp };
   const usageId = makeId();
   const notices = published ? await notificationWrites(db,updated,"feedback",`feedback:${version.id}`) : [];
@@ -425,6 +491,7 @@ async function analyze(id: string, body: Record<string, unknown>, user: ProductU
     await requirePhoneTrial(db,user.id);
   } else if (item.classId) await classPayer(db, item.classId);
   else { await requireProfile(db, user.id, ["personal"]); await requireEntitlement(db, user.id, ["personal_basic", "personal_premium"]); }
+  if ((item.materialVersion ?? 1)>1) throw new HttpError(409,"수정 자료의 AI 재첨삭·비용 정책을 준비 중입니다.","MATERIAL_REANALYSIS_POLICY_PENDING");
   // All originals and the optional question are ready in one bundle. No fabricated provider success.
   prepareAnalysisInput(item);
   throw new HttpError(503, "AI 연결을 준비 중입니다. 문제·답안·질문은 함께 저장되었고 첨삭 횟수는 차감되지 않았습니다.", "AI_NOT_CONFIGURED");
@@ -435,12 +502,26 @@ async function addMessage(id: string, body: Record<string, unknown>, user: Produ
   const item = await fetchSubmission(db, id);
   const role = await submissionAccess(db, item, user.id);
   if (!item.classId) throw new HttpError(409, "선생님과의 대화는 소속 반의 시험 기록에서 이용할 수 있습니다.", "CLASS_CHAT_REQUIRED");
+  requireActiveClass(await getClass(db,item.classId));
+  if (role === "student") await requireCurrentStudent(db,item.classId,user.id);
   const profile = await requireProfile(db, user.id);
   const itemId = optionalText(body.itemId, "관련 문항", 100) || null;
   if (itemId && !item.exam.items.some(part => part.id === itemId) && !item.latestVersion?.result.items.some(part => part.itemId === itemId)) throw new HttpError(400, "관련 문항을 확인하세요.");
+  const requestId=optionalText(body.clientRequestId,"메시지 요청 ID",100) || makeId();
   const message: ExamMessage = { id: makeId(), submissionId: id, authorId: user.id, authorName: profile.displayName, authorRole: role, itemId, text: requireText(body.text, "대화 내용", 5000), createdAt: now() };
-  await db.prepare("INSERT INTO product_messages (id, submission_id, author_id, data, created_at) VALUES (?, ?, ?, ?, ?)").bind(message.id, id, user.id, JSON.stringify(message), message.createdAt).run();
-  return productJson({ message }, 201);
+  const write=await db.prepare("INSERT OR IGNORE INTO product_messages (id, submission_id, author_id, data, created_at,client_request_id) VALUES (?, ?, ?, ?, ?,?)").bind(message.id, id, user.id, JSON.stringify(message), message.createdAt,requestId).run();
+  const saved=await db.prepare("SELECT rowid AS sequence,data FROM product_messages WHERE submission_id=? AND author_id=? AND client_request_id=?").bind(id,user.id,requestId).first<DataRow & {sequence:number}>();
+  return productJson({ message: saved ? {...decode<ExamMessage>(saved),sequence:saved.sequence} : message }, write.meta.changes ? 201 : 200);
+}
+async function pollMessages(request:Request,db:D1Database,id:string,user:ProductUser):Promise<Response> {
+  const item=await fetchSubmission(db,id);
+  await submissionAccess(db,item,user.id); // Every poll rechecks current teacher membership.
+  if (!item.classId) throw new HttpError(409,"반의 시험 기록에서 대화를 확인하세요.");
+  const cursor=new URL(request.url).searchParams.get("after") || "0";
+  if (!/^\d{1,16}$/.test(cursor) || !Number.isSafeInteger(Number(cursor))) throw new HttpError(400,"대화 갱신 위치를 확인하세요.");
+  const rows=await db.prepare("SELECT rowid AS sequence,data FROM product_messages WHERE submission_id=? AND rowid>? ORDER BY rowid LIMIT 100").bind(id,Number(cursor)).all<DataRow & {sequence:number}>();
+  const messages=rows.results.map(row=>({...decode<ExamMessage>(row),sequence:row.sequence})),last=messages.at(-1);
+  return productJson({messages,cursor:last ? String(last.sequence) : cursor,hasMore:messages.length===100});
 }
 async function fileResponse(db: D1Database, id: string, user: ProductUser): Promise<Response> {
   const row = await db.prepare("SELECT owner_id, exam_id, submission_id, object_key, role, data FROM product_files WHERE id = ?").bind(id).first<{ owner_id: string; exam_id: string | null; submission_id: string | null; object_key: string; role: ExamFileRole; data: string }>();
@@ -467,6 +548,10 @@ async function fileResponse(db: D1Database, id: string, user: ProductUser): Prom
         return assignment.exam.files.some(file => file.id === id) && (assignmentRow.role === "teacher" || row.role === "problem" || row.role === "mixed");
       });
     }
+  }
+  if (!allowed && row.exam_id && (row.role === "problem" || row.role === "mixed")) {
+    // A former student retains the problem snapshot referenced by their own historical submission.
+    allowed=Boolean(await db.prepare("SELECT s.id FROM product_submissions s, json_each(s.data,'$.exam.files') f WHERE s.student_id=? AND json_extract(f.value,'$.id')=? LIMIT 1").bind(user.id,id).first());
   }
   if (!allowed) throw new HttpError(403, "이 파일에 접근할 수 없습니다.");
   const object = await env.BUCKET?.get(row.object_key);
@@ -524,15 +609,19 @@ async function workspaceState(request: Request): Promise<Response> {
     return row.role === "teacher" ? classroom : { ...classroom, studentCode: undefined, teacherCode: undefined };
   });
   state.members = values[1].results as unknown as ProductState["members"];
-  state.exams = (values[2].results as unknown as DataRow[]).map(row => ({ ...decode<Exam>(row), revision: row.revision! }));
+  state.departures=(await db.prepare("SELECT d.class_id AS classId,d.user_id AS userId,d.status,p.display_name AS displayName FROM product_departures d JOIN product_profiles p ON p.user_id=d.user_id WHERE d.status='removed' AND EXISTS (SELECT 1 FROM product_members m WHERE m.class_id=d.class_id AND m.user_id=? AND m.role='teacher')").bind(user.id).all<NonNullable<ProductState["departures"]>[number]>()).results;
+  state.exams = (values[2].results as unknown as DataRow[]).map(row => ({ ...decode<Exam>(row), revision: row.revision! })).filter(exam=>!exam.deletedAt);
   state.assignments = (values[3].results as unknown as (DataRow & { role: string })[]).map(row => {
     const item = decode<ExamAssignment>(row);
     return row.role === "teacher" ? item : { ...item, exam: studentExam(item.exam) };
   });
   const teacherClasses = new Set(state.members.filter(member => member.userId === user.id && member.role === "teacher").map(member => member.classId));
+  const publishedBySubmission=new Map<string,FeedbackVersion>();
+  const publishedRows=await db.prepare("SELECT v.submission_id,v.data FROM product_versions v JOIN product_submissions s ON s.id=v.submission_id WHERE s.student_id=? AND v.published=1 AND v.version=(SELECT MAX(other.version) FROM product_versions other WHERE other.submission_id=v.submission_id AND other.published=1)").bind(user.id).all<DataRow & {submission_id:string}>();
+  for(const row of publishedRows.results)publishedBySubmission.set(row.submission_id,decode<FeedbackVersion>(row));
   state.submissions = await Promise.all((values[4].results as unknown as DataRow[]).map(row => {
     const item = { ...decode<ExamSubmission>(row), revision: row.revision! };
-    return visibleSubmission(db, item, Boolean(item.classId && teacherClasses.has(item.classId)));
+    return visibleSubmission(db, item, Boolean(item.classId && teacherClasses.has(item.classId)),publishedBySubmission);
   }));
   state.submissions.push(...(values[5].results as unknown as (DataRow & { owner_id: string | null })[]).map(row => legacySubmission({ ...decode<Submission>(row), revision: row.revision! }, row.owner_id === user.id)));
   state.exams.push(...(values[6].results as unknown as DataRow[]).map(row => legacyExam({ ...decode<Question>(row), revision: row.revision! })));
@@ -547,6 +636,7 @@ export async function handleProductApi(request: Request, path = new URL(request.
     const user = await requireProductUser(request);
     const db = productDatabase();
     if (request.method === "GET") {
+      if (/^submissions\/[^/]+\/messages$/.test(path)) return await pollMessages(request,db,decodeURIComponent(path.split("/")[1]),user);
       if (/^files\/[^/]+$/.test(path)) return await fileResponse(db, decodeURIComponent(path.split("/")[1]), user);
       if (/^submissions\/[^/]+(?:\/report)?$/.test(path)) {
         const detail = await getDetail(db, decodeURIComponent(path.split("/")[1]), user);
@@ -558,7 +648,10 @@ export async function handleProductApi(request: Request, path = new URL(request.
       checkProductOrigin(request);
       if (path === "exams") return await saveExam(request, user);
       if (path === "submissions") return await createSubmission(request, user);
+      if (/^submissions\/[^/]+\/materials$/.test(path)) return await reviseMaterials(request,decodeURIComponent(path.split("/")[1]),user);
       const body = await readProductJson(request);
+      const managed=await handleManagement(db,path,body,user);
+      if (managed) return managed;
       if (path === "account") return await registerAccount(body, user);
       if (path === "classes") return await createClass(body, user);
       if (path === "classes/join") return await joinClass(body, user);
@@ -578,3 +671,4 @@ export async function handleProductApi(request: Request, path = new URL(request.
     return productJson({ error: "저장 중 문제가 발생했습니다. 입력 내용은 유지하고 다시 시도해 주세요.", code: "OPERATION_FAILED" }, 500);
   }
 }
+

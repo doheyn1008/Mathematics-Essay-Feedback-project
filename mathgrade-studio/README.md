@@ -52,3 +52,5 @@ npm run dev
 이전 브라우저 저장형 화면은 `/legacy/index.html`에서 기록 열람·CSV 내보내기가 가능합니다. 기존 서버 기록은 새 작업공간에서 한 문항 시험으로 읽기 전용 표시됩니다. 키와 학생 답안은 소스 저장소에 포함하지 않습니다.
 
 추가 로그인·알림·포인트 설정과 운영 전 남은 연결은 [계정 및 사용 정책](docs/ACCOUNTS_AND_ACTIVITY.md)을 참고하세요.
+
+계정 찾기·비밀번호 변경/재설정·탈퇴, 반/시험/과제 관리, 자료 버전과 대화 자동 갱신은 [후속 관리 구현](docs/FOLLOW_UP_MANAGEMENT.md)을 참고하세요. `0009_account_and_record_management.sql`이 추가되었습니다.

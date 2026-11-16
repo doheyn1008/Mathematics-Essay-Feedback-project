@@ -67,6 +67,7 @@ function fixture(t) {
     if (options.email) headers.set('oai-authenticated-user-email', options.email);
     if (options.noOrigin) headers.delete('origin');
     if (options.cookie) headers.set('cookie',options.cookie);
+    if (options.ip) headers.set('cf-connecting-ip',options.ip);
     if (body !== undefined && !(body instanceof FormData)) headers.set('content-type','application/json');
     const response = await routeApi(new Request(`https://example.test${path.startsWith('/api/') ? path : '/api/product/'+path}`, {
       method,headers,body: body === undefined ? undefined : body instanceof FormData ? body : JSON.stringify(body),
@@ -519,6 +520,195 @@ test('free trial cannot access premium materials, class proxy submissions or cha
   assert.equal((await f.call(`submissions/${sub.id}`,'outsider')).status,403);
 });
 
+test('fixed class codes survive settings, removal and reentry; departed students retain originals and former teachers lose access',async t=>{
+  const f=fixture(t),{room,paper,work}=await f.base(),sub=await f.submit('student',work.id);
+  await f.ok(`classes/${room.id}/settings`,'teacher',{name:'이름 변경',billingTeacherId:'teacher',releaseMode:'ai_immediate'});
+  let current=(await f.ok('state','teacher')).classes[0];assert.equal(current.studentCode,room.studentCode);assert.equal(current.teacherCode,room.teacherCode);
+  assert.equal((await f.call(`classes/${room.id}/remove`,'student',{studentId:'outsider'})).status,403);
+  await f.ok(`classes/${room.id}/remove`,'teacher',{studentId:'student'});
+  assert.equal((await f.call('classes/join','student',{code:room.studentCode})).value.code,'CLASS_REENTRY_BLOCKED');
+  assert.equal((await f.call(`submissions/${sub.id}`,'student')).status,200);assert.equal((await f.call(`files/${paper.files[0].id}`,'student')).status,200);
+  assert.equal((await f.call(`submissions/${sub.id}/messages`,'student',{text:'퇴반 후 전송'})).status,403);
+  assert.equal((await f.ok('state','teacher')).departures[0].userId,'student');
+  await f.ok(`classes/${room.id}/readmit`,'teacher',{studentId:'student'});await f.ok('classes/join','student',{code:room.studentCode});
+  await f.ok(`classes/${room.id}/leave`,'student',{});await f.ok('classes/join','student',{code:room.studentCode});
+  assert.equal((await f.call(`classes/${room.id}/leave`,'teacher',{})).value.code,'CLASS_HANDOVER_REQUIRED');
+  await f.register('co','teacher',true);await f.ok('classes/join','co',{code:room.teacherCode});
+  await f.ok(`classes/${room.id}/settings`,'co',{billingTeacherId:'co'});await f.ok(`classes/${room.id}/leave`,'teacher',{});
+  for(const path of [`submissions/${sub.id}`,`submissions/${sub.id}/messages`,`files/${sub.files[0].id}`])assert.equal((await f.call(path,'teacher')).status,403);
+  current=(await f.ok('state','co')).classes[0];assert.equal(current.studentCode,room.studentCode);assert.equal(current.teacherCode,room.teacherCode);
+});
+
+test('exam and assignment management preserve snapshots and cancellation blocks new submissions and material edits',async t=>{
+  const f=fixture(t),{room,paper,work}=await f.base(),sub=await f.submit('student',work.id);
+  assert.equal((await f.call(`exams/${paper.id}/delete`,'teacher',{revision:1})).value.code,'EXAM_IN_USE');
+  await f.ok(`exams/${paper.id}/archive`,'teacher',{revision:1});
+  assert.equal((await f.call('assignments','teacher',{classId:room.id,examId:paper.id,title:'다시 배정'})).status,409);
+  assert.equal((await f.ok(`submissions/${sub.id}`,'student')).submission.exam.revision,1);
+  await f.ok(`exams/${paper.id}/restore`,'teacher',{revision:2});
+  await f.ok(`assignments/${work.id}/settings`,'teacher',{revision:1,title:'변경된 과제',dueAt:'2026-12-01T00:00:00Z'});
+  assert.equal((await f.call(`assignments/${work.id}/settings`,'teacher',{revision:1,title:'오래된 창'})).value.code,'REVISION_CONFLICT');
+  await f.ok(`assignments/${work.id}/cancel`,'teacher',{revision:2});
+  assert.equal((await f.call('submissions','student',f.form({assignmentId:work.id,clientRequestId:'cancelled'},[{role:'answer'}]))).value.code,'ASSIGNMENT_CANCELLED');
+  assert.equal((await f.call(`submissions/${sub.id}/materials`,'student',f.form({revision:1,clientRequestId:'cancelled-update',retainedFileIds:[]},[{role:'answer'}]))).value.code,'ASSIGNMENT_CANCELLED');
+  assert.equal((await f.call(`submissions/${sub.id}`,'student')).status,200);
+  const unused=await f.exam('teacher',null,{title:'미사용'});await f.ok(`exams/${unused.id}/delete`,'teacher',{revision:1});
+  assert.equal((await f.ok('state','teacher')).exams.some(e=>e.id===unused.id),false);
+  await f.ok(`classes/${room.id}/archive`,'teacher',{});
+  assert.equal((await f.call('classes/join','outsider',{code:room.studentCode})).value.code,'CLASS_ARCHIVED');
+  assert.equal((await f.call(`submissions/${sub.id}/messages`,'teacher',{text:'보관된 반'})).value.code,'CLASS_ARCHIVED');
+  await f.ok(`classes/${room.id}/leave`,'teacher',{});
+  assert.equal((await f.call(`submissions/${sub.id}`,'student')).status,200);
+});
+
+test('material replacement is versioned, idempotent and atomic; old feedback and originals survive without extra charges',async t=>{
+  const f=fixture(t),{work}=await f.base(),sub=await f.submit('student',work.id);
+  await f.ok(`submissions/${sub.id}/review`,'teacher',{revision:1,result:result(),publish:true});
+  const body={revision:2,clientRequestId:'replace-answer',retainedFileIds:[],question:'새로운 질문'};
+  const edit=f.form(body,[{role:'answer',name:'replacement.pdf'}]);
+  const changed=await f.ok(`submissions/${sub.id}/materials`,'student',edit);
+  assert.equal(changed.submission.materialVersion,2);assert.equal(changed.submission.revision,3);
+  assert.equal(changed.submission.latestVersion.materialVersion,1);
+  const repeated=await f.ok(`submissions/${sub.id}/materials`,'student',edit);assert.equal(repeated.material.id,changed.material.id);
+  const detail=await f.ok(`submissions/${sub.id}`,'student');assert.deepEqual(detail.materials.map(m=>m.version),[2,1]);assert.equal(detail.materials[1].files[0].id,sub.files[0].id);assert.equal(detail.versions.length,1);
+  assert.equal((await f.call(`files/${sub.files[0].id}`,'student')).status,200);
+  assert.equal((await f.call(`submissions/${sub.id}/materials`,'outsider',edit)).status,403);
+  await assert.rejects(()=>ingestAnalysisResult(f.db,sub.id,3,result()),e=>e.code==='MATERIAL_REANALYSIS_POLICY_PENDING');
+  assert.equal((await f.ok('state','teacher')).entitlement.used,0);
+  await f.ok(`submissions/${sub.id}/review`,'teacher',{revision:3,result:result(),publish:true});
+  const next=await f.ok(`submissions/${sub.id}`,'teacher');assert.equal(next.versions[0].materialVersion,2);assert.equal(next.versions.length,2);
+  const objectCount=f.objects.size;
+  const simultaneous=await Promise.all([f.call(`submissions/${sub.id}/materials`,'student',f.form({revision:4,clientRequestId:'race-a',retainedFileIds:[]},[{role:'answer'}])),f.call(`submissions/${sub.id}/materials`,'student',f.form({revision:4,clientRequestId:'race-b',retainedFileIds:[]},[{role:'answer'}]))]);
+  assert.deepEqual(simultaneous.map(r=>r.status).sort(),[200,409]);assert.equal(f.objects.size,objectCount+1);
+  const last=await f.ok(`submissions/${sub.id}`,'student');assert.equal(last.materials.length,3);assert.equal(last.versions.length,2);
+  const count=f.objects.size;
+  f.sqlite.exec("CREATE TRIGGER reject_material BEFORE INSERT ON product_submission_materials BEGIN SELECT RAISE(ABORT,'material failure'); END;");
+  const failed=await f.call(`submissions/${sub.id}/materials`,'student',f.form({revision:last.submission.revision,clientRequestId:'rollback',retainedFileIds:[]},[{role:'answer'}]));
+  assert.equal(failed.status,500);assert.equal(f.objects.size,count);assert.equal((await f.ok(`submissions/${sub.id}`,'student')).submission.revision,last.submission.revision);
+});
+
+test('chat polling rechecks current access and paginates by insertion sequence; retries are deduplicated across tabs',async t=>{
+  const f=fixture(t),{room,work}=await f.base(),sub=await f.submit('student',work.id),path=`submissions/${sub.id}/messages`;
+  const request={text:'같은 메시지',clientRequestId:'stable-message'};
+  const sent=await Promise.all([f.call(path,'student',request),f.call(path,'student',request)]);assert.deepEqual(sent.map(r=>r.status).sort(),[200,201]);assert.equal(sent[0].value.message.id,sent[1].value.message.id);
+  const first=await f.ok(path,'teacher');assert.equal(first.messages.length,1);assert.equal(first.hasMore,false);
+  await f.ok(path,'teacher',{text:'답변',clientRequestId:'teacher-message'},201);
+  const after=await f.ok(`${path}?after=${first.cursor}`,'student');assert.equal(after.messages.length,1);assert.equal(after.messages[0].text,'답변');
+  assert.equal((await f.ok(`${path}?after=${after.cursor}`,'student')).messages.length,0);
+  assert.equal((await f.call(path,'outsider')).status,403);assert.equal((await f.call(`${path}?after=bad`,'teacher')).status,400);
+  for(let i=0;i<102;i++){const message={id:`bulk-${i}`,submissionId:sub.id,authorId:'student',authorName:'학생',authorRole:'student',itemId:null,text:String(i),createdAt:'2000-01-01T00:00:00Z'};f.sqlite.prepare('INSERT INTO product_messages (id,submission_id,author_id,data,created_at) VALUES (?,?,?,?,?)').run(message.id,sub.id,'student',JSON.stringify(message),message.createdAt);}
+  const page=await f.ok(`${path}?after=${after.cursor}`,'teacher');assert.equal(page.messages.length,100);assert.equal(page.hasMore,true);
+  assert.equal((await f.ok(`${path}?after=${page.cursor}`,'teacher')).messages.length,2);
+  await f.register('co','teacher',true);await f.ok('classes/join','co',{code:room.teacherCode});await f.ok(`classes/${room.id}/settings`,'co',{billingTeacherId:'co'});await f.ok(`classes/${room.id}/leave`,'teacher',{});
+  assert.equal((await f.call(`${path}?after=${after.cursor}`,'teacher')).status,403);
+});
+
+test('password change verifies the current secret and invalidates all sessions and pending reset proofs',async t=>{
+  const f=fixture(t);delete runtime.PRODUCT_HOST_LOGIN;
+  const signup=await f.call('auth/signup',null,{username:'native-security',password:'original-password',displayName:'사용자',accountType:'personal'});assert.equal(signup.status,200);
+  const cookie=signup.headers.get('set-cookie').split(';')[0],state=await f.call('state',null,undefined,{cookie});
+  const id=state.value.user.id;
+  f.sqlite.prepare("INSERT INTO product_sessions (token_hash,user_id,expires_at) VALUES ('another',?,'2099-01-01')").run(id);
+  assert.equal((await f.call('account/password',null,{currentPassword:'wrong-password',password:'replacement-password'},{cookie})).status,401);
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM product_sessions').get().n,2);
+  assert.equal((await f.call('account/password',null,{currentPassword:'original-password',password:'replacement-password'},{cookie})).status,200);
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM product_sessions').get().n,0);
+  assert.equal((await f.call('state',null,undefined,{cookie})).value.user,null);
+  assert.equal((await f.call('auth/login',null,{username:'native-security',password:'original-password'})).status,401);
+  assert.equal((await f.call('auth/login',null,{username:'native-security',password:'replacement-password'})).status,200);
+});
+
+test('recovery needs a preverified number and provider approval; reset tokens expire and are one use even concurrently',async t=>{
+  const f=fixture(t);
+  assert.equal((await f.call('auth/recovery/start',null,{purpose:'username',phone:'01012345678'})).value.code,'RECOVERY_NOT_CONFIGURED');
+  smsProvider(t);
+  await f.ok('auth/signup',null,{username:'recover-user',password:'original-password',displayName:'사용자',accountType:'personal'});
+  const user=f.sqlite.prepare("SELECT user_id FROM product_credentials WHERE username='recover-user'").get().user_id;
+  const start=await phoneStart(f,user);await phoneVerify(f,user,start.challengeId);
+  const unknown=await f.ok('auth/recovery/start',null,{purpose:'username',phone:'01099998888'});
+  assert.equal((await f.call('auth/recovery/verify',null,{challengeId:unknown.challengeId,code:'123456'})).status,400);
+  const identity=await f.ok('auth/recovery/start',null,{purpose:'username',phone:'01012345678'});
+  assert.equal((await f.call('auth/recovery/verify',null,{challengeId:identity.challengeId,code:'111111'})).status,400);
+  const found=await f.ok('auth/recovery/verify',null,{challengeId:identity.challengeId,code:'123456'});assert.equal(found.username,'recover-user');
+  assert.equal((await f.call('auth/recovery/verify',null,{challengeId:identity.challengeId,code:'123456'})).value.code,'RECOVERY_EXPIRED');
+  f.sqlite.prepare("DELETE FROM product_phone_cooldowns WHERE user_id LIKE 'recovery:%'").run();
+  const reset=await f.ok('auth/recovery/start',null,{purpose:'password',username:'recover-user',phone:'01012345678'});
+  const verified=await f.ok('auth/recovery/verify',null,{challengeId:reset.challengeId,code:'123456'});assert.ok(verified.resetToken);
+  const results=await Promise.all([f.call('auth/reset-password',null,{resetToken:verified.resetToken,password:'new-password-aaa'}),f.call('auth/reset-password',null,{resetToken:verified.resetToken,password:'new-password-bbb'})]);
+  assert.deepEqual(results.map(r=>r.status).sort(),[200,400]);assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM product_sessions').get().n,0);
+  assert.equal((await f.call('auth/reset-password',null,{resetToken:verified.resetToken,password:'another-password'})).value.code,'RESET_TOKEN_INVALID');
+  const winner=results[0].status===200?'new-password-aaa':'new-password-bbb';assert.equal((await f.call('auth/login',null,{username:'recover-user',password:winner})).status,200);
+});
+
+test('account withdrawal enforces handover across all classes, revokes access and pseudonymizes authors without deleting student results',async t=>{
+  const f=fixture(t),{room,work}=await f.base(),sub=await f.submit('student',work.id);
+  await f.ok(`submissions/${sub.id}/review`,'teacher',{revision:1,result:result(),publish:true});
+  await f.ok('auth/signup',null,{username:'departing-teacher',password:'teacher-password',displayName:'선생님',accountType:'teacher'});
+  const id=f.sqlite.prepare("SELECT user_id FROM product_credentials WHERE username='departing-teacher'").get().user_id;f.grant(id,'teacher');
+  const other=await f.classroom(id);await f.ok('classes/join',id,{code:room.teacherCode});
+  const request={currentPassword:'teacher-password',confirmation:'회원 탈퇴'};
+  assert.equal((await f.call('account/withdraw',id,request)).value.code,'CLASS_HANDOVER_REQUIRED');
+  assert.ok((await f.ok('state',id)).user);
+  await f.ok(`classes/${other.id}/archive`,id,{});
+  await f.ok(`submissions/${sub.id}/messages`,id,{text:'선생님 답변',clientRequestId:'before-withdraw'},201);
+  await f.ok('account/withdraw',id,request);
+  assert.equal((await f.ok('state',id)).user,null);assert.equal((await f.call(`submissions/${sub.id}`,id)).status,401);
+  const retained=await f.ok(`submissions/${sub.id}`,'student');assert.equal(retained.versions.length,1);assert.equal(retained.messages[0].authorName,'탈퇴한 회원');
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM product_credentials WHERE user_id=?').get(id).n,0);
+  assert.equal(f.sqlite.prepare('SELECT display_name FROM product_profiles WHERE user_id=?').get(id).display_name,'탈퇴한 회원');
+});
+
+test('social-only withdrawal requires a recent proof from the exact linked social identity',async t=>{
+  const f=fixture(t);await f.register('social','personal');
+  f.sqlite.prepare("INSERT INTO product_users (id,name,email,created_at) VALUES ('social','소셜','private@example.test',?)").run(timestamp);
+  f.sqlite.prepare("INSERT INTO product_links (provider,subject,user_id,email) VALUES ('google','expected-subject','social','private@example.test')").run();
+  const settings=await f.ok('account/settings','social');assert.equal(settings.security.hasPassword,false);
+  assert.equal((await f.call('account/password','social',{currentPassword:'test-password',password:'new-password'})).value.code,'SOCIAL_ACCOUNT');
+  assert.equal((await f.call('account/withdraw','social',{confirmation:'회원 탈퇴'})).value.code,'REAUTH_REQUIRED');
+  runtime.GOOGLE_CLIENT_ID='test-client';runtime.GOOGLE_CLIENT_SECRET='test-secret';
+  const start=await f.call('auth/google?reauth=1','social'),state=new URL(start.headers.get('location')).searchParams.get('state'),cookie=start.headers.get('set-cookie').split(';')[0];
+  const old=globalThis.fetch;t.after(()=>{globalThis.fetch=old;});globalThis.fetch=async url=>Response.json(String(url).endsWith('/token')?{access_token:'test-token'}:{sub:'expected-subject',email:'private@example.test',email_verified:true});
+  const done=await f.call(`auth/google/callback?code=code&state=${state}`,'social',undefined,{cookie});assert.equal(done.status,303);
+  const proof=done.headers.getSetCookie().find(c=>c.startsWith('mg_reauth=')).split(';')[0];
+  assert.equal((await f.call('account/withdraw','social',{confirmation:'회원 탈퇴'},{cookie:proof})).status,200);
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM product_links').get().n,0);
+});
+
+test('accepting class billing transfers only unfinished submissions and preserves completed usage ownership',async t=>{
+  const f=fixture(t),{room,work}=await f.base('ai_immediate');
+  const complete=await f.submit('student',work.id);await ingestAnalysisResult(f.db,complete.id,1,result());
+  const pending=await f.submit('student',work.id);
+  await f.register('co','teacher',true);await f.ok('classes/join','co',{code:room.teacherCode});
+  await f.ok(`classes/${room.id}/settings`,'co',{billingTeacherId:'co'});
+  const one=await f.ok(`submissions/${complete.id}`,'co'),two=await f.ok(`submissions/${pending.id}`,'co');
+  assert.equal(one.submission.billingUserId,'teacher');assert.equal(one.submission.revision,2);
+  assert.equal(two.submission.billingUserId,'co');assert.equal(two.submission.revision,2);
+  await ingestAnalysisResult(f.db,pending.id,2,result());assert.equal((await f.ok('state','co')).entitlement.used,1);assert.equal((await f.ok('state','teacher')).entitlement.used,1);
+});
+
+test('expired reset tokens and another social subject cannot authorize sensitive account changes',async t=>{
+  const f=fixture(t);await f.ok('auth/signup',null,{username:'expiry-user',password:'original-password',displayName:'사용자',accountType:'personal'});
+  const user=f.sqlite.prepare("SELECT user_id FROM product_credentials WHERE username='expiry-user'").get().user_id;
+  const token='e'.repeat(64),hash=Buffer.from(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(token))).toString('hex');
+  f.sqlite.prepare("INSERT INTO product_security_tokens (token_hash,user_id,purpose,expires_at) VALUES (?,?,'password','2000-01-01')").run(hash,user);
+  assert.equal((await f.call('auth/reset-password',null,{resetToken:token,password:'different-password'})).value.code,'RESET_TOKEN_INVALID');
+  f.sqlite.prepare("INSERT INTO product_links (provider,subject,user_id,email) VALUES ('google','linked-subject',?,'')").run(user);
+  runtime.GOOGLE_CLIENT_ID='test-client';runtime.GOOGLE_CLIENT_SECRET='test-secret';
+  const start=await f.call('auth/google?reauth=1',user),state=new URL(start.headers.get('location')).searchParams.get('state'),cookie=start.headers.get('set-cookie').split(';')[0];
+  const old=globalThis.fetch;t.after(()=>{globalThis.fetch=old;});globalThis.fetch=async url=>Response.json(String(url).endsWith('/token')?{access_token:'test-token'}:{sub:'different-subject'});
+  assert.equal((await f.call(`auth/google/callback?code=code&state=${state}`,user,undefined,{cookie})).status,403);
+  assert.equal(f.sqlite.prepare("SELECT subject FROM product_links WHERE user_id=?").get(user).subject,'linked-subject');
+});
+
+test('failed guesses are isolated by username and IP and successful login clears only that scoped bucket',async t=>{
+  const f=fixture(t);delete runtime.PRODUCT_HOST_LOGIN;
+  await f.ok('auth/signup',null,{username:'lockout-test',password:'original-password',displayName:'사용자',accountType:'personal'});
+  for(let i=0;i<12;i++)assert.equal((await f.call('auth/login',null,{username:'lockout-test',password:'wrong-password'},{ip:'attacker'})).status,401);
+  assert.equal((await f.call('auth/login',null,{username:'lockout-test',password:'original-password'},{ip:'attacker'})).status,429);
+  assert.equal((await f.call('auth/login',null,{username:'lockout-test',password:'original-password'},{ip:'owner'})).status,200);
+  const key=Buffer.from(await crypto.subtle.digest('SHA-256',new TextEncoder().encode('name-ip:lockout-test:owner'))).toString('hex');
+  assert.equal(f.sqlite.prepare('SELECT key FROM product_auth_attempts WHERE key=?').get(key),undefined);
+});
 test('the administrator uses the Sites owner identity and cannot be reached through a customer session', async t => {
   const f = fixture(t);
   const directoryPath = '/api/admin/customers';
@@ -634,3 +824,4 @@ test('member type changes preserve class access and active billing', async t => 
   assert.equal((await f.ok('state', 'paid-personal')).entitlement.plan, 'personal_basic');
   assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS total FROM product_admin_customer_events WHERE user_id IN (?,?)').get('teacher', 'paid-personal').total, 0);
 });
+

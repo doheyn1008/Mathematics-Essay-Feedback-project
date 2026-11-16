@@ -165,3 +165,17 @@ test('demo role-specific class codes and billing choices match the server', asyn
   demo.persona = 'personal';
   await assert.rejects(demo.request('classes/join', { code: classroom.studentCode }), error => error.status === 403);
 });
+
+test('demo management preserves fixed codes, blocks removed students and keeps historical files and feedback',async()=>{
+  const demo=new ProductDemo(),room=demo.getState().classes.find(c=>c.id==='class-a'),codes=[room.studentCode,room.teacherCode];
+  await demo.request('classes/class-a/settings',{name:'변경된 이름',billingTeacherId:teacherId});
+  assert.deepEqual([demo.getState().classes[0].studentCode,demo.getState().classes[0].teacherCode],codes);
+  await demo.request('classes/class-a/remove',{studentId:'demo-student'});demo.persona='academy_student';
+  await assert.rejects(()=>demo.request('classes/join',{code:codes[0]}),e=>e.code==='CLASS_REENTRY_BLOCKED');assert.ok(demo.detail('sub-a').versions.length);
+  demo.persona='teacher';await demo.request('classes/class-a/readmit',{studentId:'demo-student'});demo.persona='academy_student';await demo.request('classes/join',{code:codes[0]});
+  const before=demo.detail('sub-a');await demo.request('submissions/sub-a/materials',pack({revision:before.submission.revision,clientRequestId:'replace',retainedFileIds:[],question:'수정 질문'},[{role:'answer',name:'new-answer.pdf'}]));
+  const after=demo.detail('sub-a');assert.equal(after.submission.materialVersion,2);assert.equal(after.versions.length,before.versions.length);assert.equal(after.materials.length,2);
+  const body={clientRequestId:'same-message',text:'한 번 전송'};const one=await demo.request('submissions/sub-a/messages',body),two=await demo.request('submissions/sub-a/messages',body);assert.equal(one.message.id,two.message.id);
+  demo.persona='teacher';await demo.request('assignments/assignment-a/cancel',{revision:1});
+  await assert.rejects(()=>demo.request('submissions/sub-a/materials',pack({revision:after.submission.revision,clientRequestId:'cancelled',retainedFileIds:[]},[{role:'answer'}])),e=>e.code==='ASSIGNMENT_CANCELLED');
+});

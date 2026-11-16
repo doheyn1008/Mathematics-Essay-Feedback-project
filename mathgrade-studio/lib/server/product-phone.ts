@@ -7,7 +7,7 @@ import { HttpError } from "./validation";
 type Grant = { phone_masked: string; verified_at: string; used_submission_id: string | null };
 type Challenge = { id: string; phone_hash: string; phone_masked: string; provider_sid: string; service_sid: string; expires_at: string };
 const config = () => env as unknown as Record<string, string | undefined>;
-function providerConfig() {
+export function providerConfig() {
   const c = config();
   if (!c.TWILIO_ACCOUNT_SID || !c.TWILIO_AUTH_TOKEN || !/^VA[a-f\d]{32}$/i.test(c.TWILIO_VERIFY_SERVICE_SID || "") || (c.PHONE_IDENTITY_SECRET?.length ?? 0) < 32) return null;
   return { account: c.TWILIO_ACCOUNT_SID, token: c.TWILIO_AUTH_TOKEN, service: c.TWILIO_VERIFY_SERVICE_SID!, secret: c.PHONE_IDENTITY_SECRET! };
@@ -19,7 +19,7 @@ export function normalizePhone(value: unknown): string {
   if (!/^\+[1-9]\d{7,14}$/.test(phone) || /^\+820/.test(phone)) throw new HttpError(400, "010으로 시작하는 휴대전화 번호 또는 국가번호를 포함한 번호를 입력하세요.");
   return phone;
 }
-function phoneHash(phone: string, secret: string) { return createHmac("sha256", secret).update(phone).digest("hex"); }
+export function phoneHash(phone: string, secret: string) { return createHmac("sha256", secret).update(phone).digest("hex"); }
 async function grant(db: D1Database, userId: string) { return db.prepare("SELECT phone_masked,verified_at,used_submission_id FROM product_phone_trials WHERE user_id = ?").bind(userId).first<Grant>(); }
 export async function phoneTrial(db: D1Database, userId: string): Promise<PhoneTrial> {
   const record = await grant(db, userId);
@@ -30,13 +30,13 @@ export async function requirePhoneTrial(db: D1Database, userId: string) {
   if (!status.verified) throw new HttpError(403, "전화번호 인증 후 무료 첨삭 1회를 받을 수 있습니다.", "PHONE_VERIFICATION_REQUIRED");
   if (!status.remaining) throw new HttpError(402, "전화번호 인증으로 받은 무료 첨삭 1회를 이미 사용했습니다.", "FREE_TRIAL_USED");
 }
-async function rateLimit(db: D1Database, key: string, maximum: number, windowMs: number) {
+export async function rateLimit(db: D1Database, key: string, maximum: number, windowMs: number) {
   const at = Date.now();
   await db.prepare("INSERT INTO product_auth_attempts (key,attempts,expires_at) VALUES (?,1,?) ON CONFLICT(key) DO UPDATE SET attempts = CASE WHEN expires_at <= ? THEN 1 ELSE attempts + 1 END, expires_at = CASE WHEN expires_at <= ? THEN excluded.expires_at ELSE expires_at END").bind(key, at + windowMs, at, at).run();
   const row = await db.prepare("SELECT attempts FROM product_auth_attempts WHERE key = ?").bind(key).first<{attempts:number}>();
   if (!row || row.attempts > maximum) throw new HttpError(429, "인증 요청이 많습니다. 잠시 후 다시 시도하세요.", "PHONE_RATE_LIMITED");
 }
-async function providerRequest(path: string, body: URLSearchParams, c: NonNullable<ReturnType<typeof providerConfig>>) {
+export async function providerRequest(path: string, body: URLSearchParams, c: NonNullable<ReturnType<typeof providerConfig>>) {
   let response: Response;
   try { response = await fetch(`https://verify.twilio.com/v2/Services/${c.service}/${path}`, { method: "POST", headers: { Authorization: `Basic ${Buffer.from(`${c.account}:${c.token}`).toString("base64")}`, "Content-Type": "application/x-www-form-urlencoded" }, body, signal: AbortSignal.timeout(10000) }); }
   catch { throw new HttpError(502, "문자 인증 서비스에 연결하지 못했습니다. 다시 시도하세요.", "PHONE_PROVIDER_UNAVAILABLE"); }

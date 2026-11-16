@@ -40,3 +40,10 @@ fieldset:disabled{opacity:.65}.p-account-options{border:0;padding:0}.p-hero h1 e
 @media(max-width:650px){.p-workspace .sidebar-bottom{position:static;width:auto;margin-top:12px;padding-top:0;display:block}.p-workspace .sidebar nav{padding-bottom:0}}
 
 @media(min-width:901px) and (max-width:1250px){.p-workspace .sidebar-bottom{left:12px;width:161px}}
+
+.p-class-management, .p-material-editor, .p-recovery { margin-top: 24px; }
+.p-class-management > .button { margin: 5px 8px 5px 0; }
+.p-assignment-management { min-width: 220px; padding: 10px 0; }
+.p-assignment-management > summary { cursor: pointer; }
+.p-form fieldset { min-width: 0; display: grid; gap: 16px; border: 0; padding: 0; margin: 0; }
+.p-form fieldset legend { font-weight: 700; margin-bottom: 12px; }

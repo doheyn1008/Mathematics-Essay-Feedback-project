@@ -137,8 +137,8 @@ export const productVersions = sqliteTable("product_versions", {
   id: text("id").primaryKey(), submissionId: text("submission_id").notNull().references(() => productSubmissions.id), version: integer("version").notNull(), published: integer("published").notNull(), data: text("data").notNull(), createdAt: text("created_at").notNull(),
 }, table => [uniqueIndex("product_version_unique").on(table.submissionId, table.version)]);
 export const productMessages = sqliteTable("product_messages", {
-  id: text("id").primaryKey(), submissionId: text("submission_id").notNull().references(() => productSubmissions.id), authorId: text("author_id").notNull(), data: text("data").notNull(), createdAt: text("created_at").notNull(),
-});
+  id: text("id").primaryKey(), submissionId: text("submission_id").notNull().references(() => productSubmissions.id), authorId: text("author_id").notNull(), data: text("data").notNull(), createdAt: text("created_at").notNull(), clientRequestId:text("client_request_id"),
+}, table=>[uniqueIndex("product_message_request_unique").on(table.submissionId,table.authorId,table.clientRequestId),index("product_message_timeline").on(table.submissionId,table.createdAt,table.id)]);
 export const productUsage = sqliteTable("product_usage", {
   id: text("id").primaryKey(), userId: text("user_id").notNull(), submissionId: text("submission_id").notNull().references(() => productSubmissions.id), createdAt: text("created_at").notNull(),
 }, table => [uniqueIndex("product_completed_analysis_unique").on(table.submissionId)]);
@@ -168,7 +168,7 @@ export const productLinks = sqliteTable("product_links", {
   provider: text("provider").notNull(), subject: text("subject").notNull(), userId: text("user_id").notNull().references(() => productUsers.id), email: text("email").notNull().default(""),
 }, table => [primaryKey({columns:[table.provider,table.subject]}),uniqueIndex("product_link_user_provider_unique").on(table.userId,table.provider)]);
 export const productOauth = sqliteTable("product_oauth", {
-  stateHash: text("state_hash").primaryKey(), provider: text("provider").notNull(), userId: text("user_id"), verifier: text("verifier").notNull(), expiresAt: text("expires_at").notNull(),
+  stateHash: text("state_hash").primaryKey(), provider: text("provider").notNull(), userId: text("user_id"), verifier: text("verifier").notNull(), expiresAt: text("expires_at").notNull(), purpose:text("purpose").notNull().default("login"),
 });
 export const productNotificationSettings = sqliteTable("product_notification_settings", {
   userId: text("user_id").primaryKey(), data: text("data").notNull(), updatedAt: text("updated_at").notNull(),
@@ -193,6 +193,21 @@ export const productPhoneCooldowns = sqliteTable("product_phone_cooldowns", {
   userId:text("user_id").primaryKey(), expiresAt:integer("expires_at").notNull(),
 });
 
+export const productClosedAccounts=sqliteTable("product_closed_accounts",{
+  userId:text("user_id").primaryKey(),closedAt:text("closed_at").notNull(),
+});
+export const productDepartures=sqliteTable("product_departures",{
+  classId:text("class_id").notNull().references(()=>productClasses.id),userId:text("user_id").notNull(),status:text("status").notNull(),createdAt:text("created_at").notNull(),
+},table=>[primaryKey({columns:[table.classId,table.userId]})]);
+export const productSubmissionMaterials=sqliteTable("product_submission_materials",{
+  id:text("id").primaryKey(),submissionId:text("submission_id").notNull().references(()=>productSubmissions.id),version:integer("version").notNull(),data:text("data").notNull(),createdAt:text("created_at").notNull(),
+},table=>[uniqueIndex("product_material_version_unique").on(table.submissionId,table.version)]);
+export const productRecoveryChallenges=sqliteTable("product_recovery_challenges",{
+  id:text("id").primaryKey(),userId:text("user_id"),purpose:text("purpose").notNull(),phoneHash:text("phone_hash").notNull(),providerSid:text("provider_sid").notNull(),serviceSid:text("service_sid").notNull(),expiresAt:text("expires_at").notNull(),attempts:integer("attempts").notNull().default(0),status:text("status").notNull().default("pending"),
+});
+export const productSecurityTokens=sqliteTable("product_security_tokens",{
+  tokenHash:text("token_hash").primaryKey(),userId:text("user_id").notNull(),purpose:text("purpose").notNull(),expiresAt:text("expires_at").notNull(),consumedAt:text("consumed_at"),
+});
 // Management records also support profiles created before the current login system.
 export const productAdminCustomers = sqliteTable("product_admin_customers", {
   userId: text("user_id").primaryKey(),
@@ -214,3 +229,4 @@ export const productAdminCustomerEvents = sqliteTable("product_admin_customer_ev
   previousRole: text("previous_role"),
   newRole: text("new_role"),
 }, table => [uniqueIndex("product_admin_event_customer_revision").on(table.userId, table.revision)]);
+

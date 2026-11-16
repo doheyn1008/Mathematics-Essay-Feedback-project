@@ -1,3 +1,4 @@
+import { handleRecovery, resetPassword, securityProof } from "./product-security";
 import { env } from "cloudflare:workers";
 import { randomBytes, scrypt, timingSafeEqual } from "node:crypto";
 import { checkProductOrigin, productDatabase, productIdentity, productJson, readProductJson, requireProductUser } from "./product-auth";
@@ -11,13 +12,13 @@ function derive(password: string, salt: string): Promise<Buffer> {
   return new Promise((resolve, reject) => scrypt(password, salt, 64, { N: 16384, r: 8, p: 5, maxmem: 32 * 1024 * 1024 }, (error, key) => error ? reject(error) : resolve(key)));
 }
 export async function passwordHash(password: string) { const salt = randomBytes(16).toString("hex"); return `scrypt-v1:${salt}:${(await derive(password, salt)).toString("hex")}`; }
-async function passwordMatches(password: string, encoded: string) {
+export async function passwordMatches(password: string, encoded: string) {
   const [version, salt, value] = encoded.split(":");
   if (version !== "scrypt-v1" || !salt || !value) return false;
   const actual = await derive(password, salt), expected = Buffer.from(value, "hex");
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
-function cookie(request: Request, name: string, value: string, age: number) {
+export function cookie(request: Request, name: string, value: string, age: number) {
   return `${name}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${age}${new URL(request.url).protocol === "https:" ? "; Secure" : ""}`;
 }
 async function session(request: Request, userId: string, redirect = false) {
@@ -35,14 +36,23 @@ export function authProviders() {
   return { google: Boolean(c.GOOGLE_CLIENT_ID && c.GOOGLE_CLIENT_SECRET), kakao: Boolean(c.KAKAO_CLIENT_ID && c.KAKAO_CLIENT_SECRET) };
 }
 async function limit(request: Request, username: string) {
-  const db = productDatabase(), now = Date.now();
-  // Separate IP and username buckets also cover distributed guesses and account creation.
-  for (const value of [`ip:${request.headers.get("cf-connecting-ip") || "local"}`, `name:${username}`]) {
-    const key = await tokenHash(value);
-    await db.prepare("INSERT INTO product_auth_attempts (key,attempts,expires_at) VALUES (?,1,?) ON CONFLICT(key) DO UPDATE SET attempts = CASE WHEN expires_at < ? THEN 1 ELSE attempts + 1 END, expires_at = CASE WHEN expires_at < ? THEN excluded.expires_at ELSE expires_at END").bind(key, now + 15 * 60000, now, now).run();
-    const item = await db.prepare("SELECT attempts FROM product_auth_attempts WHERE key = ?").bind(key).first<{ attempts: number }>();
-    if (item && item.attempts > (value.startsWith("ip:") ? 40 : 12)) throw new HttpError(429, "로그인 시도가 많습니다. 15분 후 다시 시도하세요.");
+  const db=productDatabase(), at=Date.now(), ip=request.headers.get("cf-connecting-ip") || "local";
+  for (const [value,max] of [[`ip:${ip}`,40],[`name-ip:${username}:${ip}`,12],[`name:${username}`,200]] as const) {
+    const key=await tokenHash(value);
+    await db.prepare("INSERT INTO product_auth_attempts (key,attempts,expires_at) VALUES (?,1,?) ON CONFLICT(key) DO UPDATE SET attempts=CASE WHEN expires_at<=? THEN 1 ELSE attempts+1 END,expires_at=CASE WHEN expires_at<=? THEN excluded.expires_at ELSE expires_at END").bind(key,at+15*60000,at,at).run();
+    const row=await db.prepare("SELECT attempts FROM product_auth_attempts WHERE key=?").bind(key).first<{attempts:number}>();
+    if (row && row.attempts>max) throw new HttpError(429,"로그인 시도가 많습니다. 잠시 후 다시 시도하세요.");
   }
+}
+export async function sensitiveLimit(request:Request,userId:string) {
+  // Reauthentication has its own bucket; a successful login cannot clear it.
+  const db=productDatabase(),key=await tokenHash(`sensitive:${userId}:${request.headers.get("cf-connecting-ip") || "local"}`),at=Date.now();
+  await db.prepare("INSERT INTO product_auth_attempts (key,attempts,expires_at) VALUES (?,1,?) ON CONFLICT(key) DO UPDATE SET attempts=CASE WHEN expires_at<=? THEN 1 ELSE attempts+1 END,expires_at=CASE WHEN expires_at<=? THEN excluded.expires_at ELSE expires_at END").bind(key,at+15*60000,at,at).run();
+  if ((await db.prepare("SELECT attempts FROM product_auth_attempts WHERE key=?").bind(key).first<{attempts:number}>())!.attempts>10) throw new HttpError(429,"본인 확인 시도가 많습니다. 잠시 후 다시 시도하세요.");
+}
+export function clearAuthCookie(request:Request,response:Response) {
+  for (const name of ["mg_session","mg_oauth","mg_reauth"]) response.headers.append("Set-Cookie",cookie(request,name,"",0));
+  return response;
 }
 async function oauth(request: Request, provider: "google" | "kakao", callback: boolean) {
   if (!authProviders()[provider]) throw new HttpError(503, `${provider === "google" ? "구글" : "카카오"} 로그인 연결을 준비 중입니다.`, "OAUTH_NOT_CONFIGURED");
@@ -50,10 +60,12 @@ async function oauth(request: Request, provider: "google" | "kakao", callback: b
   const prefix = provider.toUpperCase(), clientId = c[`${prefix}_CLIENT_ID`]!, secret = c[`${prefix}_CLIENT_SECRET`]!;
   const redirectUri = `${url.origin}/api/product/auth/${provider}/callback`;
   if (!callback) {
-    const link = url.searchParams.get("link") === "1";
+    const reauth=url.searchParams.get("reauth") === "1";
+    const link = url.searchParams.get("link") === "1" || reauth;
     const user = link ? await requireProductUser(request) : null;
+    if (reauth && !await db.prepare("SELECT subject FROM product_links WHERE user_id=? AND provider=?").bind(user!.id,provider).first()) throw new HttpError(403,"이미 연결한 소셜 계정으로 인증하세요.");
     const state = randomBytes(32).toString("hex"), verifier = randomBytes(32).toString("base64url");
-    await db.prepare("INSERT INTO product_oauth (state_hash,provider,user_id,verifier,expires_at) VALUES (?,?,?,?,?)").bind(await tokenHash(state),provider,user?.id ?? null,verifier,new Date(Date.now()+10*60000).toISOString()).run();
+    await db.prepare("INSERT INTO product_oauth (state_hash,provider,user_id,verifier,expires_at,purpose) VALUES (?,?,?,?,?,?)").bind(await tokenHash(state),provider,user?.id ?? null,verifier,new Date(Date.now()+10*60000).toISOString(),reauth ? "withdraw" : "login").run();
     const destination = new URL(provider === "google" ? "https://accounts.google.com/o/oauth2/v2/auth" : "https://kauth.kakao.com/oauth/authorize");
     destination.search = new URLSearchParams({client_id:clientId,redirect_uri:redirectUri,response_type:"code",state,...(provider === "google" ? { scope:"openid email profile",code_challenge:Buffer.from(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(verifier))).toString("base64url"),code_challenge_method:"S256" } : {})}).toString();
     return new Response(null,{status:303,headers:{Location:destination.toString(),"Set-Cookie":cookie(request,"mg_oauth",state,600),"Cache-Control":"no-store","Referrer-Policy":"no-referrer"}});
@@ -61,7 +73,7 @@ async function oauth(request: Request, provider: "google" | "kakao", callback: b
   const state = url.searchParams.get("state") || "", browserState = request.headers.get("cookie")?.match(/(?:^|;\s*)mg_oauth=([a-f0-9]{64})(?:;|$)/)?.[1];
   if (!state || state !== browserState) throw new HttpError(400,"로그인 요청이 만료되었습니다. 다시 시작하세요.");
   const hash = await tokenHash(state);
-  const row = await db.prepare("SELECT user_id,verifier FROM product_oauth WHERE state_hash = ? AND provider = ? AND expires_at > ?").bind(hash,provider,stamp()).first<{user_id:string|null;verifier:string}>();
+  const row = await db.prepare("SELECT user_id,verifier,purpose FROM product_oauth WHERE state_hash = ? AND provider = ? AND expires_at > ?").bind(hash,provider,stamp()).first<{user_id:string|null;verifier:string;purpose:string}>();
   const consumed = await db.prepare("DELETE FROM product_oauth WHERE state_hash = ?").bind(hash).run();
   if (!row || !consumed.meta.changes || url.searchParams.has("error")) throw new HttpError(400,"로그인이 취소되었거나 만료되었습니다.");
   if (row.user_id && (await productIdentity(request))?.id !== row.user_id) throw new HttpError(401,"연동할 계정으로 다시 로그인하세요.");
@@ -75,7 +87,16 @@ async function oauth(request: Request, provider: "google" | "kakao", callback: b
   const email = provider === "google" ? (info.email_verified ? info.email || "" : "") : (info.kakao_account?.is_email_verified ? info.kakao_account.email || "" : "");
   const existing = await db.prepare("SELECT user_id FROM product_links WHERE provider = ? AND subject = ?").bind(provider,subject).first<{user_id:string}>();
   if (row.user_id && existing && existing.user_id !== row.user_id) throw new HttpError(409,"이미 다른 계정에 연결된 소셜 계정입니다.");
+  if (row.purpose === "withdraw") {
+    if (!row.user_id || existing?.user_id !== row.user_id) throw new HttpError(403,"현재 계정에 연결한 소셜 계정으로 인증하세요.");
+    const proof=await securityProof(db,row.user_id,"withdraw");
+    const response=new Response(null,{status:303,headers:{Location:"/account","Cache-Control":"no-store"}});
+    response.headers.append("Set-Cookie",cookie(request,"mg_reauth",proof,300));
+    response.headers.append("Set-Cookie",cookie(request,"mg_oauth","",0));
+    return response;
+  }
   const userId = row.user_id || existing?.user_id || crypto.randomUUID();
+  if (await db.prepare("SELECT user_id FROM product_closed_accounts WHERE user_id=?").bind(userId).first()) throw new HttpError(401,"탈퇴한 계정입니다.");
   if (!row.user_id && !existing) await db.prepare("INSERT INTO product_users (id,name,email,created_at) VALUES (?,?,?,?)").bind(userId,info.name || info.properties?.nickname || "회원",email,stamp()).run();
   // Email equality never auto-links accounts. Linking requires an authenticated session.
   await db.prepare("INSERT INTO product_links (provider,subject,user_id,email) VALUES (?,?,?,?) ON CONFLICT(user_id,provider) DO UPDATE SET subject=excluded.subject,email=excluded.email").bind(provider,subject,userId,email).run();
@@ -95,6 +116,8 @@ export async function handleLogin(request: Request, path: string): Promise<Respo
     if (token) await db.prepare("DELETE FROM product_sessions WHERE token_hash = ?").bind(await tokenHash(token)).run();
     const response = productJson({ok:true}); response.headers.set("Set-Cookie",cookie(request,"mg_session","",0)); return response;
   }
+  if (path.startsWith("recovery/")) return handleRecovery(request,path.slice(9),db);
+  if (path === "reset-password") return resetPassword(request,db);
   if (path !== "login" && path !== "signup") throw new HttpError(404,"요청한 기능을 찾을 수 없습니다.");
   const body = await readProductJson(request), username = requireText(body.username,"아이디",40).toLowerCase();
   if (!/^[a-z0-9][a-z0-9_-]{3,39}$/.test(username)) throw new HttpError(400,"아이디는 영문·숫자·밑줄·하이픈으로 4~40자 입력하세요.");
@@ -117,5 +140,6 @@ export async function handleLogin(request: Request, path: string): Promise<Respo
   // Do equivalent work for nonexistent accounts, too.
   const valid = await passwordMatches(password,credential?.password_hash || `scrypt-v1:${"0".repeat(32)}:${"0".repeat(128)}`);
   if (!credential || !valid) throw new HttpError(401,"아이디 또는 비밀번호를 확인하세요.");
+  await db.prepare("DELETE FROM product_auth_attempts WHERE key=?").bind(await tokenHash(`name-ip:${username}:${request.headers.get("cf-connecting-ip") || "local"}`)).run();
   return session(request,credential.user_id);
 }
