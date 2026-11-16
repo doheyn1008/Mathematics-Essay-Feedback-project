@@ -65,5 +65,13 @@ export type AdminCustomerDetail = {
   };
   memberships: { id: string; name: string; role: "teacher" | "student"; joinedAt: string }[];
   recentSubmissions: AdminSubmissionSummary[];
-  history: { id: string; status: CustomerStatus; actorName: string; createdAt: string; revision: number }[];
+  history: {
+    id: string;
+    status: CustomerStatus;
+    actorName: string;
+    createdAt: string;
+    revision: number;
+    previousRole: CustomerRole | null;
+    newRole: CustomerRole | null;
+  }[];
 };

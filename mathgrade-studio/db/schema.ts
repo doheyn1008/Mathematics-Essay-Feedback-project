@@ -211,4 +211,6 @@ export const productAdminCustomerEvents = sqliteTable("product_admin_customer_ev
   actorId: text("actor_id").notNull(),
   actorName: text("actor_name").notNull(),
   createdAt: text("created_at").notNull(),
+  previousRole: text("previous_role"),
+  newRole: text("new_role"),
 }, table => [uniqueIndex("product_admin_event_customer_revision").on(table.userId, table.revision)]);

@@ -574,3 +574,73 @@ test('the administrator uses the Sites owner identity and cannot be reached thro
   assert.equal((await f.call('state', 'student')).value.profile.accountType, 'academy_student');
   assert.equal((await f.call('state', 'student')).value.entitlement, null);
 });
+
+test('only the owner can assign a member type, and assignments change customer permissions without granting a plan', async t => {
+  const f = fixture(t);
+  const owner = { email: 'owner@example.test' };
+  runtime.ADMIN_OWNER_EMAIL = owner.email;
+  runtime.ADMIN_SITE_ORIGIN = 'https://example.test';
+  await f.register('new-teacher', 'personal');
+  const path = '/api/admin/customers/new-teacher';
+  const change = { role: 'teacher', status: 'active', note: '', revision: 0 };
+  assert.equal((await f.call(path, 'new-teacher', change, { email: 'member@example.test' })).status, 403);
+  assert.equal((await f.call(path, 'owner', { ...change, role: 'admin' }, owner)).status, 400);
+  const saved = await f.call(path, 'owner', change, owner);
+  assert.equal(saved.status, 200, JSON.stringify(saved.value));
+  assert.equal(saved.value.customer.role, 'teacher');
+  assert.equal(saved.value.customer.entitlement, null);
+  assert.equal(saved.value.history[0].previousRole, 'personal');
+  assert.equal(saved.value.history[0].newRole, 'teacher');
+  assert.equal((await f.ok('state','new-teacher')).profile.accountType, 'teacher');
+  assert.equal((await f.call('account', 'new-teacher', { accountType: 'personal', displayName: '이름' })).value.code, 'ACCOUNT_TYPE_LOCKED');
+  assert.equal((await f.call('classes', 'new-teacher', { name: '역할 변경 후 확인', billingTeacherId: 'new-teacher' })).status, 402);
+  assert.equal((await f.call(path, 'owner', { ...change, role: 'personal' }, owner)).status, 409);
+
+  f.sqlite.prepare('INSERT INTO product_users (id,name,created_at) VALUES (?,?,?)').run('waiting-user', '가입 대기 고객', timestamp);
+  const freshPath = '/api/admin/customers/waiting-user';
+  const assigned = await f.call(freshPath, 'owner', { ...change, role: 'academy_student' }, owner);
+  assert.equal(assigned.status, 200, JSON.stringify(assigned.value));
+  assert.equal(assigned.value.customer.name, '가입 대기 고객');
+  assert.equal(assigned.value.history[0].previousRole, null);
+  assert.equal(assigned.value.history[0].newRole, 'academy_student');
+  const peers = await f.call('/api/admin/customers?role=academy_student', 'owner', undefined, owner);
+  assert.deepEqual(peers.value.items.map(item => item.id), ['waiting-user']);
+
+  const simultaneous = await Promise.all(['personal','academy_student'].map(role => f.call(path, 'owner', { ...change, role, revision: 1 }, owner)));
+  assert.deepEqual(simultaneous.map(result => result.status).sort(), [200,409]);
+  const winner = simultaneous.find(result => result.status === 200).value;
+  assert.equal(winner.history.length, 2);
+  assert.equal(winner.history[0].previousRole, 'teacher');
+  assert.equal(winner.history[0].newRole, winner.customer.role);
+});
+
+test('member type changes preserve class access and active billing, while support notes still save', async t => {
+  const f = fixture(t);
+  const owner = { email: 'owner@example.test' };
+  runtime.ADMIN_OWNER_EMAIL = owner.email;
+  runtime.ADMIN_SITE_ORIGIN = 'https://example.test';
+  const { room, work } = await f.base();
+  const submission = await f.submit('student', work.id);
+  const change = { role: 'personal', status: 'active', note: '변경 검토', revision: 0 };
+  const student = await f.call('/api/admin/customers/student', 'owner', change, owner);
+  assert.equal(student.status, 409, JSON.stringify(student.value));
+  assert.equal(student.value.code, 'CUSTOMER_ROLE_HAS_MEMBERSHIPS');
+  assert.equal((await f.ok(`submissions/${submission.id}`, 'student')).submission.id, submission.id);
+  const support = await f.call('/api/admin/customers/student', 'owner', { ...change, role: 'academy_student' }, owner);
+  assert.equal(support.status, 200, JSON.stringify(support.value));
+  assert.equal(support.value.customer.note, '변경 검토');
+  assert.equal(support.value.history[0].newRole, null);
+
+  // Isolate an inconsistent older room that still names this payer without a membership row.
+  f.sqlite.prepare('DELETE FROM product_members WHERE class_id = ? AND user_id = ?').run(room.id, 'teacher');
+  const teacher = await f.call('/api/admin/customers/teacher', 'owner', change, owner);
+  assert.equal(teacher.status, 409, JSON.stringify(teacher.value));
+  assert.equal(teacher.value.code, 'CUSTOMER_ROLE_BILLING_TEACHER');
+
+  await f.register('paid-personal', 'personal', true);
+  const entitlement = await f.call('/api/admin/customers/paid-personal', 'owner', { ...change, role: 'teacher' }, owner);
+  assert.equal(entitlement.status, 409, JSON.stringify(entitlement.value));
+  assert.equal(entitlement.value.code, 'CUSTOMER_ROLE_ACTIVE_ENTITLEMENT');
+  assert.equal((await f.ok('state', 'paid-personal')).entitlement.plan, 'personal_basic');
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS total FROM product_admin_customer_events WHERE user_id IN (?,?)').get('teacher', 'paid-personal').total, 0);
+});

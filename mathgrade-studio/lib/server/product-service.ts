@@ -571,6 +571,9 @@ export async function handleProductApi(request: Request, path = new URL(request.
     throw new HttpError(404, "요청한 기능을 찾을 수 없습니다.");
   } catch (error) {
     if (error instanceof HttpError) return productJson({ error: error.message, code: error.code }, error.status);
+    if (error instanceof Error && error.message.includes("PRODUCT_MEMBER_ROLE_MISMATCH")) {
+      return productJson({ error: "계정 유형이 변경되었습니다. 새로고침한 뒤 다시 시도해 주세요.", code: "ACCOUNT_TYPE_CHANGED" }, 409);
+    }
     console.error("Product operation failed", error instanceof Error ? error.message : "Unknown error");
     return productJson({ error: "저장 중 문제가 발생했습니다. 입력 내용은 유지하고 다시 시도해 주세요.", code: "OPERATION_FAILED" }, 500);
   }

@@ -16,7 +16,8 @@ const pageSize = 25;
 const recentLimit = 12;
 const historyLimit = 20;
 const customerStatuses = new Set<string>(["new", "active", "follow_up", "closed"]);
-const customerRoles = new Set<string>(["teacher", "academy_student", "personal", "unassigned"]);
+const assignedRoles = new Set<string>(["teacher", "academy_student", "personal"]);
+const customerRoles = new Set([...assignedRoles, "unassigned"]);
 
 // Product user rows are created at signup; a profile is added at onboarding.
 // Include profiles saved before the introduction of product login as well.
@@ -41,6 +42,41 @@ const accountRows = `
 `;
 
 const customerColumns = "id, name, username, role, createdAt, status, revision";
+const roleState = `
+  SELECT (SELECT account_type FROM product_profiles WHERE user_id = candidate.id) AS role,
+    CASE
+      WHEN EXISTS (
+        SELECT 1 FROM product_classes
+        WHERE json_extract(data, '$.billingTeacherId') = candidate.id
+      ) THEN 'billing'
+      WHEN EXISTS (SELECT 1 FROM product_members WHERE user_id = candidate.id) THEN 'member'
+      WHEN EXISTS (
+        SELECT 1 FROM product_entitlements e
+        WHERE e.user_id = candidate.id AND e.status = 'active'
+          AND (COALESCE(e.expires_at, '') = '' OR julianday(e.expires_at) > julianday(candidate.checkedAt))
+          AND NOT (
+            (candidate.targetRole = 'teacher' AND e.plan = 'teacher')
+            OR (candidate.targetRole = 'personal' AND e.plan IN ('personal_basic', 'personal_premium'))
+          )
+      ) THEN 'entitlement'
+    END AS blocker
+  FROM (SELECT ? AS id, ? AS targetRole, ? AS checkedAt) candidate
+`;
+
+const roleBlockers = {
+  billing: {
+    code: "CUSTOMER_ROLE_BILLING_TEACHER",
+    message: "이 회원은 반의 이용권을 부담하고 있습니다. 반의 이용권 담당을 변경한 뒤 유형을 수정하세요.",
+  },
+  member: {
+    code: "CUSTOMER_ROLE_HAS_MEMBERSHIPS",
+    message: "이 회원은 소속된 반이 있습니다. 반 소속을 정리한 뒤 유형을 수정하세요.",
+  },
+  entitlement: {
+    code: "CUSTOMER_ROLE_ACTIVE_ENTITLEMENT",
+    message: "변경할 유형에서 사용할 수 없는 활성 이용권이 있습니다. 이용권 상태를 확인해 주세요.",
+  },
+} as const;
 const submissionProjection = `
   SELECT s.id, COALESCE(NULLIF(json_extract(s.data, '$.exam.title'), ''), '제목 미등록') AS title,
     json_extract(c.data, '$.name') AS className, s.created_at AS createdAt,
@@ -148,7 +184,8 @@ async function customerDetail(db: D1Database, id: string): Promise<AdminCustomer
     db.prepare(`${submissionProjection}
       WHERE s.student_id = ? ORDER BY s.created_at DESC, s.id DESC LIMIT ?`).bind(id, recentLimit),
     db.prepare(`
-      SELECT id, status, actor_name AS actorName, created_at AS createdAt, revision
+      SELECT id, status, actor_name AS actorName, created_at AS createdAt, revision,
+        previous_role AS previousRole, new_role AS newRole
       FROM product_admin_customer_events WHERE user_id = ? ORDER BY revision DESC LIMIT ?`).bind(id, historyLimit),
   ]);
 
@@ -173,6 +210,23 @@ async function customerDetail(db: D1Database, id: string): Promise<AdminCustomer
   };
 }
 
+function roleFromBody(value: unknown): CustomerRole | undefined {
+  if (value === undefined) return;
+  if (typeof value !== "string" || !assignedRoles.has(value)) {
+    throw new HttpError(400, "회원 유형을 선택하세요.", "CUSTOMER_ROLE_INVALID");
+  }
+  return value as CustomerRole;
+}
+
+function readCustomerBase(db: D1Database, id: string) {
+  return db.prepare(`${accountRows} SELECT revision, role FROM customers WHERE id = ?`)
+    .bind(id).first<Pick<AdminCustomer, "revision" | "role">>();
+}
+
+function revisionConflict(): HttpError {
+  return new HttpError(409, "다른 곳에서 회원 관리 정보가 변경되었습니다. 최신 정보를 불러와 주세요.", "CUSTOMER_REVISION_CONFLICT");
+}
+
 async function updateCustomer(
   db: D1Database,
   id: string,
@@ -186,39 +240,71 @@ async function updateCustomer(
   if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0 || revision >= Number.MAX_SAFE_INTEGER) {
     throw new HttpError(400, "수정할 기록 버전이 올바르지 않습니다.");
   }
+  const requestedRole = roleFromBody(body.role);
   const note = optionalText(body.note, "내부 메모", 2000);
-  const current = await db.prepare(`
-    ${accountRows} SELECT revision FROM customers WHERE id = ?
-  `).bind(id).first<{ revision: number }>();
+  const current = await readCustomerBase(db, id);
   if (!current) throw new HttpError(404, "회원을 찾을 수 없습니다.", "CUSTOMER_NOT_FOUND");
-  if (current.revision !== revision) {
-    throw new HttpError(409, "다른 곳에서 회원 관리 정보가 변경되었습니다. 최신 정보를 불러와 주세요.", "CUSTOMER_REVISION_CONFLICT");
-  }
+  if (current.revision !== revision) throw revisionConflict();
+  const changedRole = requestedRole !== current.role ? requestedRole : undefined;
   const eventId = crypto.randomUUID();
   const createdAt = new Date().toISOString();
 
-  // The operation ID binds the audit record to this request's specific winning update.
-  // A stale update changes neither the management record nor its audit history.
-  const [updated] = await db.batch([
-    db.prepare(`
-      INSERT INTO product_admin_customers (user_id, status, note, revision, updated_at, last_event_id)
-      SELECT ?, ?, ?, ?, ?, ?
-      WHERE ? = 0 OR EXISTS (
-        SELECT 1 FROM product_admin_customers WHERE user_id = ? AND revision = ?
-      )
-      ON CONFLICT (user_id) DO UPDATE SET
-        status = excluded.status, note = excluded.note, revision = excluded.revision,
-        updated_at = excluded.updated_at, last_event_id = excluded.last_event_id
-      WHERE product_admin_customers.revision = ?
-    `).bind(id, status, note, revision + 1, createdAt, eventId, revision, id, revision, revision),
-    db.prepare(`
-      INSERT INTO product_admin_customer_events (id, user_id, status, revision, actor_id, actor_name, created_at)
-      SELECT ?, user_id, status, revision, ?, ?, updated_at
-      FROM product_admin_customers WHERE user_id = ? AND last_event_id = ?
-    `).bind(eventId, actor.id, actor.name, id, eventId),
-  ]);
+  const roleGuard = changedRole
+    ? `AND EXISTS (SELECT 1 FROM (${roleState}) state WHERE state.role IS ? AND state.blocker IS NULL)`
+    : "";
+  const roleBindings = changedRole ? [id, changedRole, createdAt, current.role] : [];
+
+  // D1 executes this batch in one transaction. Only the winning operation ID can
+  // update the product profile and create its audit event.
+  const statements = [db.prepare(`
+    INSERT INTO product_admin_customers (user_id, status, note, revision, updated_at, last_event_id)
+    SELECT ?, ?, ?, ?, ?, ?
+    WHERE (
+      EXISTS (SELECT 1 FROM product_users WHERE id = ?)
+      OR EXISTS (SELECT 1 FROM product_profiles WHERE user_id = ?)
+    )
+    AND (? = 0 OR EXISTS (
+      SELECT 1 FROM product_admin_customers WHERE user_id = ? AND revision = ?
+    ))
+    ${roleGuard}
+    ON CONFLICT (user_id) DO UPDATE SET
+      status = excluded.status, note = excluded.note, revision = excluded.revision,
+      updated_at = excluded.updated_at, last_event_id = excluded.last_event_id
+    WHERE product_admin_customers.revision = ?
+  `).bind(id, status, note, revision + 1, createdAt, eventId, id, id, revision, id, revision, ...roleBindings, revision)];
+
+  if (changedRole) {
+    statements.push(db.prepare(`
+      INSERT INTO product_profiles (user_id, account_type, display_name, created_at)
+      SELECT c.user_id, ?, COALESCE(NULLIF(u.name, ''), '이름 미등록'), ?
+      FROM product_admin_customers c
+      LEFT JOIN product_users u ON u.id = c.user_id
+      WHERE c.user_id = ? AND c.last_event_id = ?
+      ON CONFLICT (user_id) DO UPDATE SET account_type = excluded.account_type
+    `).bind(changedRole, createdAt, id, eventId));
+  }
+
+  statements.push(db.prepare(`
+    INSERT INTO product_admin_customer_events (
+      id, user_id, status, revision, actor_id, actor_name, created_at, previous_role, new_role
+    )
+    SELECT ?, user_id, status, revision, ?, ?, updated_at, ?, ?
+    FROM product_admin_customers WHERE user_id = ? AND last_event_id = ?
+  `).bind(eventId, actor.id, actor.name, changedRole ? current.role : null, changedRole ?? null, id, eventId));
+
+  const [updated] = await db.batch(statements);
   if (updated.meta.changes !== 1) {
-    throw new HttpError(409, "다른 곳에서 회원 관리 정보가 변경되었습니다. 최신 정보를 불러와 주세요.", "CUSTOMER_REVISION_CONFLICT");
+    const latest = await readCustomerBase(db, id);
+    if (!latest) throw new HttpError(404, "회원을 찾을 수 없습니다.", "CUSTOMER_NOT_FOUND");
+    if (changedRole && latest.revision === revision) {
+      const state = await db.prepare(roleState).bind(id, changedRole, createdAt)
+        .first<{ role: CustomerRole | null; blocker: keyof typeof roleBlockers | null }>();
+      if (state?.role === current.role && state.blocker) {
+        const { code, message } = roleBlockers[state.blocker];
+        throw new HttpError(409, message, code);
+      }
+    }
+    throw revisionConflict();
   }
   return customerDetail(db, id);
 }

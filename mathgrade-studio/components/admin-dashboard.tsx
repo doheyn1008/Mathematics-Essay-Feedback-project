@@ -22,7 +22,7 @@ type AdminView = (typeof navigation)[number]["key"];
 const roleLabels: Record<CustomerRole, string> = {
   teacher: "선생님",
   academy_student: "학원 학생",
-  personal: "개인 회원",
+  personal: "개인 학습자",
 };
 
 const statusLabels: Record<CustomerStatus, string> = {
@@ -55,7 +55,7 @@ const emptyFilters: Filters = { query: "", role: "", status: "", page: 1 };
 const noteLimit = 2000;
 
 class AdminApiError extends Error {
-  constructor(message: string, readonly status: number) {
+  constructor(message: string, readonly status: number, readonly code?: string) {
     super(message);
     this.name = "AdminApiError";
   }
@@ -65,9 +65,11 @@ async function adminRequest<T>(path: string, options: RequestInit = {}): Promise
   const response = await fetch(path, { ...options, credentials: "same-origin", cache: "no-store" });
   const body = await response.json().catch(() => null);
   if (!response.ok) {
-    const detail = body && typeof body === "object" && "error" in body && typeof body.error === "string"
-      ? body.error : "관리자 데이터를 불러오지 못했습니다.";
-    throw new AdminApiError(detail, response.status);
+    const errorBody = body && typeof body === "object" ? body : {};
+    const detail = "error" in errorBody && typeof errorBody.error === "string"
+      ? errorBody.error : "관리자 데이터를 불러오지 못했습니다.";
+    const code = "code" in errorBody && typeof errorBody.code === "string" ? errorBody.code : undefined;
+    throw new AdminApiError(detail, response.status, code);
   }
   if (body === null) {
     throw new AdminApiError("관리자 서버의 응답을 확인하지 못했습니다.", 502);
@@ -113,6 +115,10 @@ function formatDate(value: string | null, withTime = false): string {
 
 function formatCount(value: number): string {
   return numberFormat.format(value);
+}
+
+function formatRole(role: CustomerRole | null): string {
+  return role ? roleLabels[role] : "유형 미등록";
 }
 
 function StatusPill({ status }: { status: CustomerStatus }) {
@@ -368,13 +374,15 @@ function CustomerEdit({ customer, history, onSaved, onReload, onAuthError }: {
   onReload(): void;
   onAuthError(error: AdminApiError): void;
 }) {
+  const [role, setRole] = useState(customer.role);
   const [status, setStatus] = useState(customer.status);
   const [note, setNote] = useState(customer.note);
   const [saving, setSaving] = useState(false);
   const [conflict, setConflict] = useState(false);
   const [error, setError] = useState("");
   const saveInProgress = useRef(false);
-  const changed = status !== customer.status || note !== customer.note;
+  const roleChanged = role !== null && role !== customer.role;
+  const changed = roleChanged || status !== customer.status || note !== customer.note;
 
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -386,13 +394,13 @@ function CustomerEdit({ customer, history, onSaved, onReload, onAuthError }: {
       const data = await adminRequest<AdminCustomerDetail>(`/api/admin/customers/${encodeURIComponent(customer.id)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status, note, revision: customer.revision }),
+        body: JSON.stringify({ status, note, revision: customer.revision, ...(roleChanged ? { role } : {}) }),
       });
       onSaved(data);
     } catch (cause) {
       if (cause instanceof AdminApiError) {
         if (cause.status === 401 || cause.status === 403) onAuthError(cause);
-        if (cause.status === 409) setConflict(true);
+        if (cause.status === 409 && cause.code === "CUSTOMER_REVISION_CONFLICT") setConflict(true);
         setError(cause.message);
       } else {
         setError("연결 상태를 확인하고 저장을 다시 시도해 주세요.");
@@ -407,22 +415,43 @@ function CustomerEdit({ customer, history, onSaved, onReload, onAuthError }: {
     <div className="mg-admin-stack">
       <Card title="고객 관리" description="관리 상태와 내부 메모는 관리자만 확인할 수 있습니다.">
         <form className="mg-admin-card-body mg-admin-follow-up-form" onSubmit={save}>
-          <label className="mg-admin-field">
-            <span>관리 상태</span>
-            <select value={status} onChange={(event) => setStatus(event.target.value as CustomerStatus)} disabled={saving}>
-              {Object.entries(statusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-            </select>
-          </label>
-          <p className="mg-admin-edit-hint">문의 대응을 위한 내부 상태입니다.</p>
-          <label className="mg-admin-field">
-            <span>내부 메모</span>
-            <textarea value={note} maxLength={noteLimit} onChange={(event) => setNote(event.target.value)} disabled={saving} rows={5} placeholder="문의 현황과 다음에 확인할 내용을 기록하세요." />
-          </label>
+          <fieldset className="mg-admin-edit-group" disabled={saving || conflict}>
+            <legend>서비스 계정</legend>
+            <label className="mg-admin-field">
+              <span>계정 유형</span>
+              <select value={role ?? ""} onChange={(event) => { setRole((event.target.value || null) as CustomerRole | null); setError(""); }} aria-describedby="mg-admin-role-hint">
+                {customer.role === null && <option value="">유형 미등록</option>}
+                {Object.entries(roleLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </select>
+            </label>
+            <p id="mg-admin-role-hint" className="mg-admin-edit-hint">계정 유형에 따라 회원이 이용하는 서비스 기능과 작업공간이 달라집니다. 유료 이용권은 별도로 관리합니다.</p>
+            {roleChanged && (
+              <p className="mg-admin-notice mg-admin-role-preview" role="status">
+                <strong>저장할 계정 유형 변경</strong>
+                <span>{formatRole(customer.role)} → {formatRole(role)}</span>
+              </p>
+            )}
+          </fieldset>
+          <fieldset className="mg-admin-edit-group" disabled={saving || conflict}>
+            <legend>내부 운영 기록</legend>
+            <label className="mg-admin-field">
+              <span>관리 상태</span>
+              <select value={status} onChange={(event) => { setStatus(event.target.value as CustomerStatus); setError(""); }}>
+                {Object.entries(statusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </select>
+            </label>
+            <label className="mg-admin-field">
+              <span>내부 메모</span>
+              <textarea value={note} maxLength={noteLimit} onChange={(event) => { setNote(event.target.value); setError(""); }} rows={5} placeholder="문의 현황과 다음에 확인할 내용을 기록하세요." />
+            </label>
+          </fieldset>
           {error && <p className="mg-admin-notice error" role="alert">{error}</p>}
           {conflict && <button type="button" className="mg-admin-button" onClick={onReload}>입력을 버리고 최신 정보 불러오기</button>}
           <div className="mg-admin-form-footer">
             <small>{formatCount(note.length)} / {formatCount(noteLimit)}</small>
-            <button type="submit" className="mg-admin-button primary" disabled={!changed || saving || conflict}>{saving ? "저장 중…" : "관리 기록 저장"}</button>
+            <button type="submit" className="mg-admin-button primary" disabled={!changed || saving || conflict}>
+              {saving ? "저장 중…" : roleChanged ? "계정 유형 변경 저장" : "관리 기록 저장"}
+            </button>
           </div>
           {customer.updatedAt && <p className="mg-admin-edit-hint">마지막 수정 {formatDate(customer.updatedAt, true)}</p>}
         </form>
@@ -432,7 +461,13 @@ function CustomerEdit({ customer, history, onSaved, onReload, onAuthError }: {
           <ul className="mg-admin-rows">
             {history.map((entry) => (
               <li key={entry.id} className="mg-admin-row">
-                <div className="mg-admin-row-main"><strong>{entry.actorName}</strong><time dateTime={entry.createdAt}>{formatDate(entry.createdAt, true)}</time></div>
+                <div className="mg-admin-row-main">
+                  <strong>{entry.actorName}</strong>
+                  <time dateTime={entry.createdAt}>{formatDate(entry.createdAt, true)}</time>
+                  {entry.newRole && entry.newRole !== entry.previousRole && (
+                    <span>계정 유형 {formatRole(entry.previousRole)} → {formatRole(entry.newRole)}</span>
+                  )}
+                </div>
                 <StatusPill status={entry.status} />
               </li>
             ))}
@@ -464,8 +499,9 @@ function CustomerDetail({ id, onBack, onAuthError, onChange }: {
   }
 
   function update(data: AdminCustomerDetail) {
+    const changedRole = data.customer.role !== (saved ?? query.data)?.customer.role;
     setSaved(data);
-    setNotice("관리 기록을 저장했습니다.");
+    setNotice(changedRole ? "계정 유형을 변경했습니다." : "관리 기록을 저장했습니다.");
     onChange();
   }
 

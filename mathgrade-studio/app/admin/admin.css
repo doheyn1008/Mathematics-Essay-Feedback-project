@@ -118,6 +118,10 @@
 .mg-admin-definition dt { margin-bottom: 5px; font-size: 12px; }
 .mg-admin-definition dd { font-weight: 690; font-size: 14px; }
 .mg-admin-follow-up-form { display: grid; gap: 13px; }
+.mg-admin-edit-group { display: grid; gap: 10px; margin: 0; padding: 0; border: 0; min-inline-size: 0; }
+.mg-admin-edit-group + .mg-admin-edit-group { border-top: 1px solid var(--ad-border); padding-top: 8px; }
+.mg-admin-edit-group legend { padding: 0 4px 0 0; margin-bottom: 7px; font-size: 14px; font-weight: 750; }
+.mg-admin-role-preview { display: grid; gap: 2px; }
 .mg-admin-form-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
 .mg-admin-form-footer small { font-variant-numeric: tabular-nums; }
 .mg-admin-notice { border: 1px solid #e4dcec; background: #f4f0fa; padding: 9px 11px; border-radius: 7px; font-size: 12px; line-height: 1.6; }
