@@ -1,4 +1,5 @@
 import type { AccountType, ClassRoom, Contribution, Exam, ExamFile, ExamFileRole, ExamItem, ExamResult, ExamSubmission, FeedbackVersion, ProductState, ReleaseMode, SubmissionDetail } from "../product-types";
+import { isExamDifficulty } from "../exam-difficulty";
 import { ApiError } from "./api";
 import { validateExamResult } from "../server/product-analysis";
 
@@ -9,6 +10,12 @@ function text(value: unknown, label: string, maximum: number, required = false):
   if (value == null && !required) return "";
   if (typeof value !== "string" || value.trim().length > maximum || (required && !value.trim())) return fail(`${label}을 확인하세요.`);
   return value.trim();
+}
+function difficultyInput(value: unknown, previous?: Exam["difficulty"]): Exam["difficulty"] {
+  if (value === undefined) return previous;
+  if (value === null) return undefined;
+  if (isExamDifficulty(value)) return value;
+  return fail("시험 난이도를 확인하세요.");
 }
 function checkRevision(value: unknown, expected: number) {
   if (value !== expected) fail("다른 창에서 수정되었습니다. 최신 기록을 다시 불러오세요.", 409, "REVISION_CONFLICT");
@@ -56,11 +63,14 @@ export class ProductDemo {
       { id: "class-a", name: "A대 수리논술 심화반", createdBy: "demo-teacher", billingTeacherId: "demo-teacher", releaseMode: "teacher_review", studentCode: "DEMO-A-STUDENT", teacherCode: "DEMO-A-TEACHER", createdAt },
       { id: "class-b", name: "B대 수리논술 실전반", createdBy: "demo-teacher", billingTeacherId: "demo-teacher", releaseMode: "ai_immediate", studentCode: "DEMO-B-STUDENT", teacherCode: "DEMO-B-TEACHER", createdAt },
     ];
-    const exam: Exam = { id: "exam-a", ownerId: "demo-teacher", classId: "class-a", title: "미분과 적분 · 주간 논술 3회", sourceLabel: "수식채점실 자체 작성 · 체험용 가상 시험", sourceUrl: "", items: [{ id: "q1", label: "1번 · 극값의 존재", maxScore: 40, criteria: "도함수의 부호와 극값의 존재 조건을 논리적으로 설명" }, { id: "q2", label: "2번 · 정적분의 활용", maxScore: 60, criteria: "구간 분할, 식의 구성과 계산 과정 평가" }], files: [], releaseMode: "teacher_review", revision: 1, createdAt };
-    const examB: Exam = { ...structuredClone(exam), id: "exam-b", classId: "class-b", title: "함수의 추론 · 실전 논술 1회", releaseMode: "ai_immediate" };
+    const exam: Exam = { id: "exam-a", ownerId: "demo-teacher", classId: "class-a", title: "미분과 적분 · 주간 논술 3회", difficulty: "advanced", sourceLabel: "수식채점실 자체 작성 · 체험용 가상 시험", sourceUrl: "", items: [{ id: "q1", label: "1번 · 극값의 존재", maxScore: 40, criteria: "도함수의 부호와 극값의 존재 조건을 논리적으로 설명" }, { id: "q2", label: "2번 · 정적분의 활용", maxScore: 60, criteria: "구간 분할, 식의 구성과 계산 과정 평가" }], files: [], releaseMode: "teacher_review", revision: 1, createdAt };
+    const examB: Exam = { ...structuredClone(exam), id: "exam-b", classId: "class-b", title: "함수의 추론 · 실전 논술 1회", difficulty: "standard", releaseMode: "ai_immediate" };
     const result: ExamResult = { items: [{ itemId: "q1", label: "1번 · 극값의 존재", score: 32, maxScore: 40, evidence: "도함수의 영점을 찾았으나 부호 변화의 근거가 한 단계 생략되었습니다.", feedback: "증가·감소 표를 제시한 뒤 극값을 결론 내리세요.", solution: "정의역을 먼저 확인하고, 도함수의 부호가 바뀌는지 구간별로 판단합니다.", uncertainty: "" }, { itemId: "q2", label: "2번 · 정적분의 활용", score: 48, maxScore: 60, evidence: "적분식과 계산은 적절하며, 넓이에 대한 절댓값 처리가 부족합니다.", feedback: "그래프가 x축 아래에 놓이는 구간의 부호를 확인하세요.", solution: "교점을 기준으로 적분 구간을 나누고 각 구간 넓이를 더합니다.", uncertainty: "" }], total: 80, maximum: 100, summary: "핵심 아이디어를 잘 잡았습니다. 결론을 쓰기 전에 조건을 확인하는 문장을 한 줄씩 보강하면 풀이의 완성도가 높아집니다.", questionResponse: "극값의 존재는 도함수가 0인 것만으로 충분하지 않습니다. 그 점의 좌우에서 도함수의 부호가 바뀌는지도 확인해야 합니다.", basis: "provided", uncertainties: [] };
     const aiVersion: FeedbackVersion = { id: "v-ai", submissionId: "sub-a", version: 1, authorId: "demo-ai", authorName: "AI 예시 결과", authorType: "ai", createdAt, result, teacherReviewed: false, published: false };
-    const teacherVersion: FeedbackVersion = { ...structuredClone(aiVersion), id: "v-teacher", version: 2, authorId: "demo-teacher", authorName: "유지민 선생님", authorType: "teacher", teacherReviewed: true, published: true };
+    const reviewedResult = structuredClone(result);
+    reviewedResult.items[1].score += 4;
+    reviewedResult.total += 4;
+    const teacherVersion: FeedbackVersion = { ...structuredClone(aiVersion), id: "v-teacher", version: 2, authorId: "demo-teacher", authorName: "유지민 선생님", authorType: "teacher", result: reviewedResult, teacherReviewed: true, published: true };
     const a: ExamSubmission = { id: "sub-a", studentId: "demo-student", studentName: "김서연", submittedBy: "demo-student", classId: "class-a", assignmentId: "assignment-a", billingUserId: "demo-teacher", exam, files: [], question: "도함수가 0이 되는 점을 모두 극값이라고 써도 되나요?", processing: "completed", visibility: "visible", reviewStatus: "reviewed", releaseMode: "teacher_review", latestVersion: teacherVersion, revision: 2, createdAt, updatedAt: createdAt };
     const b: ExamSubmission = { ...structuredClone(a), id: "sub-b", studentId: "demo-student-2", studentName: "이준호", submittedBy: "demo-teacher", latestVersion: null, visibility: "private", reviewStatus: "unreviewed", processing: "not_configured", revision: 1, question: "2번 풀이의 흐름을 집중해서 봐주세요." };
     const c: ExamSubmission = { ...structuredClone(a), id: "sub-c", classId: "class-b", assignmentId: "assignment-b", exam: examB, releaseMode: "ai_immediate", reviewStatus: "unreviewed", latestVersion: { ...structuredClone(aiVersion), id: "v-ai-b", submissionId: "sub-c", published: true }, revision: 1 };
@@ -109,6 +119,12 @@ export class ProductDemo {
       detail.submission = { ...detail.submission, exam: studentExam(detail.submission.exam), latestVersion: latest, visibility: latest ? "visible" : "private", reviewStatus: latest?.teacherReviewed && (latest.materialVersion??1)===(detail.submission.materialVersion??1) ? "reviewed" : "unreviewed" };
     }
     detail.versions.sort((a, b) => b.version - a.version);
+    if (this.teacherFor(detail.submission.classId) && !detail.submission.legacyId) {
+      const first = detail.versions.findLast(version =>
+        version.authorType === "ai" || (version.authorType === "teacher" && version.published && version.teacherReviewed)
+      );
+      detail.submission.firstFeedbackScore = first ? { total: first.result.total, maximum: first.result.maximum } : null;
+    }
     return detail;
   }
   premiumCatalog(): Contribution[] {
@@ -228,7 +244,7 @@ export class ProductDemo {
       const retained = (previous?.files.filter(file => retainedIds.includes(file.id)) ?? []).map(file=>file.itemId&&!items.some(item=>item.id===file.itemId)?{...file,itemId:undefined}:file);
       if (![...retained, ...files].some(file => file.role === "problem" || file.role === "mixed")) fail("문제지 파일을 한 개 이상 등록하세요.");
       if (retained.length + files.length > 12) fail("시험 자료는 12개까지 등록할 수 있습니다.");
-      const exam: Exam = { id: examId, ownerId: person.id, classId, title: text(body.title, "시험 이름", 200, true), sourceLabel: body.sourceLabel === undefined ? previous?.sourceLabel ?? "" : text(body.sourceLabel, "문제 출처", 500), sourceUrl: body.sourceUrl === undefined ? previous?.sourceUrl ?? "" : sourceUrl(body.sourceUrl), items, files: [...retained, ...files].map((file, order) => ({ ...file, order })), releaseMode: release(body.releaseMode, classId ? this.classroom(classId).releaseMode : person.role === "personal" ? "ai_immediate" : "teacher_review"), revision: (previous?.revision ?? 0) + 1, createdAt: previous?.createdAt ?? now(), ...(previous?.originContributionId ? { originContributionId: previous.originContributionId } : {}) };
+      const exam: Exam = { id: examId, ownerId: person.id, classId, title: text(body.title, "시험 이름", 200, true), difficulty: difficultyInput(body.difficulty, previous?.difficulty), sourceLabel: body.sourceLabel === undefined ? previous?.sourceLabel ?? "" : text(body.sourceLabel, "문제 출처", 500), sourceUrl: body.sourceUrl === undefined ? previous?.sourceUrl ?? "" : sourceUrl(body.sourceUrl), items, files: [...retained, ...files].map((file, order) => ({ ...file, order })), releaseMode: release(body.releaseMode, classId ? this.classroom(classId).releaseMode : person.role === "personal" ? "ai_immediate" : "teacher_review"), revision: (previous?.revision ?? 0) + 1, createdAt: previous?.createdAt ?? now(), ...(previous?.originContributionId ? { originContributionId: previous.originContributionId } : {}) };
       this.state.exams = [exam, ...this.state.exams.filter(entry => entry.id !== exam.id)]; return { exam: structuredClone(exam) };
     }
     if (path === "assignments") {
@@ -264,7 +280,7 @@ export class ProductDemo {
         if (person.role !== "personal") fail("학원 제출은 배정된 과제를 선택하세요.", 403);
         if (body.classId || (body.studentId && body.studentId !== person.id)) fail("본인 개인 시험만 제출할 수 있습니다.", 403);
         if (body.examId) { const existing = this.state.exams.find(entry => entry.id === body.examId); if (!existing || existing.ownerId !== person.id || existing.classId) fail("본인 개인 학습공간의 시험만 선택하세요.", 403); if (existing.originContributionId) this.requirePremium(); exam = structuredClone(existing); }
-        else { if (!files.some(file => file.role === "problem" || file.role === "mixed")) fail("문제와 답안 파일을 함께 첨부하세요."); exam = { id: id(), ownerId: person.id, classId: null, title: text(body.title, "시험 이름", 200, true), sourceLabel: text(body.sourceLabel, "문제 출처", 500), sourceUrl: sourceUrl(body.sourceUrl), items: [], files: files.filter(file => file.role === "problem" || file.role === "mixed"), releaseMode: "ai_immediate", revision: 1, createdAt: now() }; direct = true; }
+        else { if (!files.some(file => file.role === "problem" || file.role === "mixed")) fail("문제와 답안 파일을 함께 첨부하세요."); exam = { id: id(), ownerId: person.id, classId: null, title: text(body.title, "시험 이름", 200, true), difficulty: difficultyInput(body.difficulty), sourceLabel: text(body.sourceLabel, "문제 출처", 500), sourceUrl: sourceUrl(body.sourceUrl), items: [], files: files.filter(file => file.role === "problem" || file.role === "mixed"), releaseMode: "ai_immediate", revision: 1, createdAt: now() }; direct = true; }
       }
       matchItems(files, exam.items);
       const submission: ExamSubmission = { materialVersion:1, id: id(), studentId, studentName, submittedBy: person.id, classId, assignmentId: assignment?.id ?? null, billingUserId, exam: structuredClone(exam), files, question: text(body.question, "궁금한 점", 10000), processing: "not_configured", visibility: "private", reviewStatus: "unreviewed", releaseMode: exam.releaseMode, latestVersion: null, revision: 1, createdAt: now(), updatedAt: now() };

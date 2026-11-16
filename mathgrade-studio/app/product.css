@@ -47,3 +47,194 @@ fieldset:disabled{opacity:.65}.p-account-options{border:0;padding:0}.p-hero h1 e
 .p-assignment-management > summary { cursor: pointer; }
 .p-form fieldset { min-width: 0; display: grid; gap: 16px; border: 0; padding: 0; margin: 0; }
 .p-form fieldset legend { font-weight: 700; margin-bottom: 12px; }
+
+.p-record-score-pair {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  color: #111;
+  text-align: right;
+}
+
+.p-record-score-pair > span {
+  display: grid;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.p-record-score-pair small {
+  font-size: 10px;
+}
+
+.p-record-score-pair strong {
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.p-detail-first-score {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 14px;
+  border-radius: 8px;
+  background: #f3edf9;
+  color: #111;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 650px) {
+  .p-record-score-pair {
+    order: 4;
+    flex: 1;
+    gap: 6px 10px;
+  }
+  .p-record-score-pair strong {
+    font-size: 12px;
+  }
+}
+
+.p-tabs-admissions {
+  flex-wrap: wrap;
+}
+.p-tabs-admissions button {
+  white-space: nowrap;
+}
+.p-admission-line {
+  display: grid;
+  gap: 18px;
+  color: #111;
+}
+.p-line-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.p-line-heading svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+.p-line-heading h2 {
+  font-size: 18px;
+  margin-bottom: 5px;
+}
+.p-line-score {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 14px 16px;
+  border-radius: 8px;
+  background: #f4edf9;
+  font-size: 12px;
+}
+.p-line-score strong {
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
+}
+.p-line-results {
+  display: grid;
+  gap: 10px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.p-line-result {
+  display: grid;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid #e8def2;
+  border-radius: 8px;
+  min-width: 0;
+}
+.p-line-result-head, .p-line-result-foot {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+.p-line-result h3 {
+  font-size: 14px;
+  margin-bottom: 4px;
+  overflow-wrap: anywhere;
+}
+.p-line-result h3 span {
+  font-weight: 500;
+}
+.p-line-values {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  margin: 0;
+}
+.p-line-values div {
+  display: grid;
+  gap: 3px;
+}
+.p-line-values dt {
+  font-size: 11px;
+}
+.p-line-values dd {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.p-line-source {
+  display: inline;
+  font-size: 11px;
+  line-height: 1.65;
+  color: #111;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  overflow-wrap: anywhere;
+}
+.p-line-source svg {
+  display: inline;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+.p-line-add {
+  justify-self: start;
+}
+.p-line-form {
+  margin-top: 0;
+  padding-top: 16px;
+  border-top: 1px solid #e8def2;
+}
+.p-line-form .p-line-confirm {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 8px;
+  line-height: 1.65;
+}
+.p-line-confirm input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin: 1px 0 0;
+  accent-color: #653b86;
+}
+.p-line-form input[readonly] {
+  background: #f8f4fb;
+}
+@media print {
+  .p-line-form, .p-line-add, .p-line-result-foot .button { display: none; }
+}
+
+.p-admission-stability {
+  display: grid;
+  gap: 14px;
+  padding-bottom: 22px;
+  margin-bottom: 22px;
+  border-bottom: 1px solid var(--p-line, #e5e7eb);
+}
+.p-admission-evidence summary { cursor: pointer; width: fit-content; }
+.p-admission-evidence ul { display: grid; gap: 10px; margin: 10px 0 0; padding: 0; list-style: none; }
+.p-admission-evidence li { display: grid; gap: 3px; padding: 10px 0 0; border-top: 1px solid var(--p-line, #e5e7eb); }
+.p-admission-evidence li p { margin: 2px 0; }
