@@ -5,7 +5,7 @@ import "./admin.css";
 
 export const metadata: Metadata = {
   title: "관리자 센터 | 수식채점실",
-  description: "수식채점실 회원, 반, 제출 관리",
+  description: "수식채점실 회원 관리",
   robots: { index: false, follow: false },
 };
 
