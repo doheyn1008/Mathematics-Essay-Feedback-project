@@ -30,7 +30,3 @@ npm run deploy:check
 일반 Workers가 기본 대상이며, 기존 ChatGPT Sites 경로는 `npm run dev:sites`와 `npm run build:sites`로 명시적으로 선택합니다. Sites 프로젝트 설정과 데이터는 자동 이전되지 않습니다.
 
 자체 가입·로그인·파일 저장 기능이 구현되어 있습니다. 실제 AI 첨삭·결제·SMS·소셜 로그인은 각각 운영 연결이 필요합니다. Sites 기반 관리자 인증은 일반 Workers에서 비활성화됩니다. [앱 설명](mathgrade-studio/README.md)에서 동작 범위를 확인하세요.
-
-## 초안 보관
-
-이전 풀이결 초안은 [`archive/pulgyeol/`](archive/pulgyeol/)에 보관했습니다. 기본 실행·운영 빌드·CI에서 제외되며 Git 이력도 남아 있습니다. 초안만 살펴보려면 `npm --prefix archive/pulgyeol run dev`를 사용합니다.
