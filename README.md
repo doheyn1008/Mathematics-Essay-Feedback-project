@@ -1,57 +1,36 @@
-# 풀이결
+# 수식채점실
 
-수리논술 답안을 제출하고, 채점 기준에 따라 풀이를 돌아보는 웹사이트의 초기 틀입니다. **현재 버전은 API 키 없이 실행하는 체험용 화면**입니다.
+수학 시험과 손글씨 답안을 제출하고 첨삭 기록을 관리하는 앱입니다. **운영 앱은 `mathgrade-studio/` 하나입니다.** Cloudflare Workers + D1 + R2를 사용합니다.
 
-## 로컬에서 실행
+## 로컬 실행과 검증
 
-Node.js 24 이상을 사용합니다. 외부 패키지가 없어 별도의 설치 명령은 필요하지 않습니다.
+Node.js 22.13 이상을 사용합니다. CI는 Node.js 24에서 실행합니다.
 
 ```sh
+npm run install:app
+npm --prefix mathgrade-studio run db:migrate:local
 npm run dev
 ```
 
-브라우저에서 `http://127.0.0.1:4173`을 엽니다.
+`http://localhost:5173/`에서 확인합니다. `?demo=1`은 가상 데이터 체험입니다.
 
 ```sh
-npm run check
 npm test
+npm run check
 npm run build
+npm run deploy:check
 ```
 
-- `check`: JavaScript 구문 검사
-- `test`: 입력 검증, 저장 상태, 체험 리포트 등 핵심 로직 검사
-- `build`: 배포용 정적 파일을 `dist/`에 생성
+루트 명령도 모두 `mathgrade-studio/`를 실행합니다. Worker와 정적 자산은 `mathgrade-studio/dist/`에 생성됩니다. 정적 HTML만 배포하면 API와 DB가 동작하지 않습니다.
 
-## 체험할 수 있는 화면
+## 배포
 
-- 서비스 소개와 예시 리포트
-- 체험 학습실과 제출 내역
-- 문제 선택, 풀이 작성, 이미지·PDF 파일 선택
-- 채점 기준과 피드백을 보여주는 리포트
-- 문제 자료실과 요금제 안내
+[Cloudflare 배포 안내](mathgrade-studio/docs/CLOUDFLARE_DEPLOYMENT.md)에 D1·R2 생성, 마이그레이션, 환경변수, Git 연결 빌드 설정과 `qed.it.kr` 연결 순서를 정리했습니다. GitHub Actions는 테스트·빌드·배포 모의 검사만 실행합니다.
 
-문제와 리포트는 서비스 체험을 위해 만든 예시입니다. 실제 대학의 공식 기출이나 공식 채점 결과로 제공하지 않습니다.
+일반 Workers가 기본 대상이며, 기존 ChatGPT Sites 경로는 `npm run dev:sites`와 `npm run build:sites`로 명시적으로 선택합니다. Sites 프로젝트 설정과 데이터는 자동 이전되지 않습니다.
 
-## 현재 버전의 동작 범위
+자체 가입·로그인·파일 저장 기능이 구현되어 있습니다. 실제 AI 첨삭·결제·SMS·소셜 로그인은 각각 운영 연결이 필요합니다. Sites 기반 관리자 인증은 일반 Workers에서 비활성화됩니다. [앱 설명](mathgrade-studio/README.md)에서 동작 범위를 확인하세요.
 
-| 항목 | 현재 동작 |
-| --- | --- |
-| 첨삭 | AI를 호출하지 않고 **고정된 예시 리포트**를 표시합니다. 입력한 풀이의 실제 채점 결과가 아닙니다. |
-| 계정 | 개인정보를 요구하지 않는 체험 계정입니다. 실제 회원가입·본인 인증·접근 권한 검증은 없습니다. |
-| 파일 | 브라우저에서 파일을 선택하고 검증하는 UI입니다. 원본 파일을 서버에 업로드하거나 보관하지 않습니다. |
-| 저장 | 작성 내용과 체험 내역은 해당 브라우저의 `localStorage`를 사용합니다. 다른 기기와 동기화되지 않으며, 브라우저 데이터를 지우면 사라집니다. |
-| 결제 | 요금제와 선택 흐름을 미리 보는 화면입니다. 실제 결제나 이용료 청구는 발생하지 않습니다. |
+## 초안 보관
 
-체험 계정은 보안 경계가 아닙니다. 실제 학생 정보나 민감한 답안을 저장하는 운영 서비스로 사용하기 전에 인증·권한·보관 정책을 구현해야 합니다.
-
-## 코드 구성과 다음 연결 지점
-
-- `src/data.js`: 체험용 문제, 채점 기준, 리포트 데이터
-- `src/store.js`: 브라우저 상태 저장
-- `src/services.js`: 입력 검증과 체험 리포트 생성 경계
-- `scripts/`: 로컬 실행, 검사, 정적 빌드 도구
-- `tests/`: 외부 API 없이 실행하는 핵심 로직 테스트
-
-실제 회원·결제·AI를 붙일 때의 책임 분리는 [아키텍처 문서](docs/ARCHITECTURE.md)에 정리했습니다. API 키나 결제 시크릿을 이 저장소 또는 브라우저 코드에 넣지 마세요.
-
-GitHub Actions는 검사와 빌드만 실행하며 자동 배포하지 않습니다. 유료 서비스를 운영할 때는 상용 서비스 운영이 가능한 호스팅을 선택해야 합니다. [GitHub Pages는 상업적 SaaS 운영용 무료 호스팅을 허용하지 않습니다.](https://docs.github.com/en/pages/getting-started-with-github-pages/github-pages-limits)
+이전 풀이결 초안은 [`archive/pulgyeol/`](archive/pulgyeol/)에 보관했습니다. 기본 실행·운영 빌드·CI에서 제외되며 Git 이력도 남아 있습니다. 초안만 살펴보려면 `npm --prefix archive/pulgyeol run dev`를 사용합니다.

@@ -129,6 +129,9 @@ export async function handleLogin(request: Request, path: string): Promise<Respo
     return session(request, await provisionSiteAccount(request, db));
   }
   if (path === "logout") {
+    // The UI sends {}. Consume it before an early response so local workerd
+    // releases the request stream and subsequent session reads promptly.
+    if (request.body) await readProductJson(request);
     const token = request.headers.get("cookie")?.match(/(?:^|;\s*)mg_session=([a-f0-9]{64})(?:;|$)/)?.[1];
     if (token) await db.prepare("DELETE FROM product_sessions WHERE token_hash = ?").bind(await tokenHash(token)).run();
     const response = productJson({ok:true}); response.headers.set("Set-Cookie",cookie(request,"mg_session","",0)); return response;

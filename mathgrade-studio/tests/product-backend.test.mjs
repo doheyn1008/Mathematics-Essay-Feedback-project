@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import ts from 'typescript';
+import { standaloneRequest } from '../lib/worker-ingress.mjs';
 
 const appDir = fileURLToPath(new URL('..', import.meta.url));
 const scratch = await mkdtemp(join(tmpdir(), 'mathgrade-product-backend-'));
@@ -69,9 +70,11 @@ function fixture(t) {
     if (options.cookie) headers.set('cookie',options.cookie);
     if (options.ip) headers.set('cf-connecting-ip',options.ip);
     if (body !== undefined && !(body instanceof FormData)) headers.set('content-type','application/json');
-    const response = await routeApi(new Request(`https://example.test${path.startsWith('/api/') ? path : '/api/product/'+path}`, {
+    let request = new Request(`https://example.test${path.startsWith('/api/') ? path : '/api/product/'+path}`, {
       method,headers,body: body === undefined ? undefined : body instanceof FormData ? body : JSON.stringify(body),
-    }));
+    });
+    if (options.standalone) request = standaloneRequest(request);
+    const response = await routeApi(request);
     const value = response.headers.get('content-type')?.includes('application/json') ? await response.json() : new Uint8Array(await response.arrayBuffer());
     return { status: response.status, value, headers: response.headers };
   }
@@ -863,4 +866,25 @@ test('verified existing Sites members can resume the same profile through explic
   assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS count FROM product_users WHERE id=?').get('existing-teacher').count, 1);
   assert.equal((await f.call('auth/logout', null, {}, { cookie })).status, 200);
   assert.equal((await f.call('state', 'existing-teacher', undefined, { ...host, cookie })).value.user, null);
+});
+
+test('public Worker ingress rejects forged Sites login and administrator headers while app sessions work', async t => {
+  const f = fixture(t);
+  await f.register('existing-owner', 'teacher', true);
+  runtime.ADMIN_OWNER_EMAIL = 'owner@example.test';
+  runtime.ADMIN_SITE_ORIGIN = 'https://example.test';
+  const forged = { standalone: true, email: 'owner@example.test' };
+  assert.equal((await f.call('state', 'existing-owner', undefined, forged)).value.user, null);
+  assert.equal((await f.call('auth/providers', 'existing-owner', undefined, forged)).value.legacySiteAccount, false);
+  assert.equal((await f.call('auth/site-session', 'existing-owner', {}, forged)).status, 403);
+  assert.equal((await f.call('/api/admin/access', 'existing-owner', undefined, forged)).status, 401);
+  const signup = await f.call('auth/signup', 'existing-owner', {
+    username: 'worker_member', password: 'worker-password-example', displayName: '회원', accountType: 'personal',
+  }, forged);
+  assert.equal(signup.status, 200, JSON.stringify(signup.value));
+  const cookie = signup.headers.get('set-cookie').split(';')[0];
+  const state = await f.call('state', 'existing-owner', undefined, { ...forged, cookie });
+  assert.equal(state.value.profile.accountType, 'personal');
+  assert.notEqual(state.value.user.id, 'existing-owner');
+  assert.equal((await f.call('/api/admin/access', 'existing-owner', undefined, { ...forged, cookie })).status, 401);
 });

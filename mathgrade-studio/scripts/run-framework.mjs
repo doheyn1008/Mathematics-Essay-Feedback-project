@@ -4,7 +4,12 @@ import { readExecutionProfile } from "./execution-profile.mjs";
 
 const [command, ...args] = process.argv.slice(2);
 if (!["dev", "build"].includes(command)) throw new Error("Expected dev or build.");
-const managedLinux = readExecutionProfile() === "managed-linux";
+const sitesIndex = args.indexOf("--sites");
+if (sitesIndex !== -1) {
+  process.env.MATHGRADE_DEPLOYMENT_TARGET = "sites";
+  args.splice(sitesIndex, 1);
+}
+const managedLinux = readExecutionProfile() === "managed-linux" && process.env.MATHGRADE_DEPLOYMENT_TARGET === "sites";
 
 if (managedLinux && command === "build") {
   const result = spawnSync("bash", [

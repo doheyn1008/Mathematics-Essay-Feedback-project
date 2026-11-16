@@ -5,6 +5,9 @@ import { readExecutionProfile } from "./scripts/execution-profile.mjs";
 import { configureToolEnvironment } from "./scripts/tool-environment.mjs";
 import { sites } from "./scripts/vite/sites-vite-plugin";
 import { connectorPreview } from "./scripts/vite/connector-preview-plugin.mjs";
+import { readDeploymentTarget } from "./scripts/deployment-target.mjs";
+import { rm } from "node:fs/promises";
+import { resolve } from "node:path";
 
 const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
   "00000000-0000-4000-8000-000000000000";
@@ -39,11 +42,13 @@ const localBindingConfig = {
 
 export default defineConfig(async ({ command }) => {
   configureToolEnvironment(process.cwd());
+  const sitesHosting = readDeploymentTarget() === "sites";
 
   // Wrangler snapshots its log path while the Cloudflare plugin is imported.
   const { cloudflare } = await import("@cloudflare/vite-plugin");
 
   return {
+    define: { "import.meta.env.SITES_HOSTING": JSON.stringify(sitesHosting) },
     server: {
       ...(managedLinux
         ? { host: "0.0.0.0", allowedHosts: ["terminal.local"] }
@@ -54,12 +59,17 @@ export default defineConfig(async ({ command }) => {
     },
     plugins: [
       vinext(),
-      sites({ mockAuth: !managedLinux }),
-      connectorPreview(),
+      ...(sitesHosting ? [sites({ mockAuth: !managedLinux }), connectorPreview()] : [{
+        name: "remove-sites-deployment-metadata",
+        async closeBundle() {
+          await rm(resolve("dist/.openai"), { recursive: true, force: true });
+        },
+      }]),
       cloudflare({
         viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
         inspectorPort: false,
-        config: {
+        persistState: { path: ".wrangler/state" },
+        ...(sitesHosting ? { configPath: "./wrangler.sites.json", config: {
           ...localBindingConfig,
           ...(command === "serve"
             ? {
@@ -72,8 +82,8 @@ export default defineConfig(async ({ command }) => {
                 ],
               }
             : {}),
-        },
-        ...(command === "serve"
+        } } : { configPath: "./wrangler.json" }),
+        ...(sitesHosting && command === "serve"
           ? {
               auxiliaryWorkers: [
                 {

@@ -4,3 +4,7 @@ declare namespace Cloudflare {
     BUCKET?: R2Bucket;
   }
 }
+
+interface ImportMetaEnv {
+  readonly SITES_HOSTING: boolean;
+}
