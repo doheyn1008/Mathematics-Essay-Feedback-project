@@ -103,15 +103,16 @@ function QueryState({ loading, error, onRetry }: { loading: boolean; error: Admi
 
 function AccessView({ error, signInUrl }: { error: AdminApiError; signInUrl: string }) {
   const needsLogin = error.status === 401;
+  const sitesLogin = signInUrl.startsWith("/signin-with-chatgpt");
   return (
     <div className="mg-admin-state access">
       <section className="mg-admin-access-card" aria-labelledby="admin-access-title">
         <LockKeyhole size={28} aria-hidden="true" />
         <h1 id="admin-access-title">{needsLogin ? "관리자 로그인이 필요합니다" : "관리자 권한이 필요합니다"}</h1>
-        <p>{needsLogin ? "수식채점실 사이트를 소유한 ChatGPT 계정으로 로그인해 주세요." : "이 계정으로는 수식채점실 관리자 센터에 접근할 수 없습니다."}</p>
+        <p>{needsLogin ? (sitesLogin ? "수식채점실 사이트를 소유한 ChatGPT 계정으로 로그인해 주세요." : "관리자로 지정된 수식채점실 계정으로 로그인해 주세요.") : error.code === "ADMIN_NOT_CONFIGURED" ? error.message : "이 계정으로는 수식채점실 관리자 센터에 접근할 수 없습니다."}</p>
         <div className="mg-admin-actions">
           <a className="mg-admin-button" href="/">수식채점실로 이동</a>
-          {needsLogin && <a className="mg-admin-button primary" href={signInUrl} target="_top">ChatGPT로 로그인</a>}
+          {needsLogin && <a className="mg-admin-button primary" href={signInUrl} target="_top">{sitesLogin ? "ChatGPT로 로그인" : "수식채점실 로그인"}</a>}
         </div>
       </section>
     </div>

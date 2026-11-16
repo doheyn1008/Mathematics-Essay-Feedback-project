@@ -1,15 +1,19 @@
 {
-  "name": "pulgyeol",
+  "name": "mathematics-essay-feedback",
   "version": "0.1.0",
   "private": true,
-  "type": "module",
-  "description": "풀이결 — 수리논술 첨삭 서비스의 API 연결 전 웹 프로토타입",
-  "engines": { "node": ">=24" },
+  "description": "수식채점실 — Cloudflare Workers 운영 앱",
+  "engines": { "node": ">=22.13.0" },
   "scripts": {
-    "dev": "node scripts/dev.mjs",
-    "check": "node scripts/check.mjs",
-    "test": "node --test tests/*.test.js",
-    "build": "node scripts/build.mjs",
-    "preview": "node scripts/dev.mjs --dist"
+    "install:app": "npm --prefix mathgrade-studio ci",
+    "dev": "npm --prefix mathgrade-studio run dev",
+    "dev:sites": "npm --prefix mathgrade-studio run dev:sites",
+    "check": "npm --prefix mathgrade-studio run check",
+    "test": "npm --prefix mathgrade-studio test",
+    "build": "npm --prefix mathgrade-studio run build",
+    "build:sites": "npm --prefix mathgrade-studio run build:sites",
+    "start": "npm --prefix mathgrade-studio start",
+    "deploy:check": "npm --prefix mathgrade-studio run deploy:check",
+    "deploy": "npm --prefix mathgrade-studio run deploy"
   }
 }
