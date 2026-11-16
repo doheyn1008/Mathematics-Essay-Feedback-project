@@ -1,3 +1,4 @@
+import { handleAdminApi } from "./admin-service";
 import { handleLogin } from "./product-login";
 import { handleAccount } from "./product-account";
 import { handleApi } from "./service";
@@ -10,6 +11,9 @@ import { HttpError } from "./validation";
 export async function routeApi(request: Request): Promise<Response> {
   try {
     const path = new URL(request.url).pathname.replace(/^\/api\//, "").replace(/\/$/, "");
+    if (path === "admin" || path.startsWith("admin/")) {
+      return await handleAdminApi(request, path.slice("admin/".length));
+    }
     if (path.startsWith("product/")) {
       const productPath = path.slice("product/".length);
       if (productPath.startsWith("auth/")) return await handleLogin(request, productPath.slice(5));

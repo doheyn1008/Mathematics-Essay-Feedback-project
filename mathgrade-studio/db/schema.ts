@@ -1,4 +1,5 @@
-import { integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { sql } from "drizzle-orm";
+import { check, index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const academies = sqliteTable("academies", {
   id: text("id").primaryKey(),
@@ -112,10 +113,10 @@ export const productEntitlements = sqliteTable("product_entitlements", {
 });
 export const productClasses = sqliteTable("product_classes", {
   id: text("id").primaryKey(), studentCode: text("student_code").notNull(), teacherCode: text("teacher_code").notNull(), data: text("data").notNull(), createdAt: text("created_at").notNull(),
-}, table => [uniqueIndex("product_class_student_code_unique").on(table.studentCode), uniqueIndex("product_class_teacher_code_unique").on(table.teacherCode)]);
+}, table => [uniqueIndex("product_class_student_code_unique").on(table.studentCode), uniqueIndex("product_class_teacher_code_unique").on(table.teacherCode), index("product_classes_created").on(table.createdAt, table.id)]);
 export const productMembers = sqliteTable("product_members", {
   classId: text("class_id").notNull().references(() => productClasses.id), userId: text("user_id").notNull().references(() => productProfiles.userId), role: text("role").notNull(), displayName: text("display_name").notNull(), joinedAt: text("joined_at").notNull(),
-}, table => [primaryKey({ columns: [table.classId, table.userId] })]);
+}, table => [primaryKey({ columns: [table.classId, table.userId] }), index("product_members_user_joined").on(table.userId, table.joinedAt)]);
 export const productExams = sqliteTable("product_exams", {
   id: text("id").primaryKey(), ownerId: text("owner_id").notNull(), classId: text("class_id").references(() => productClasses.id), data: text("data").notNull(), revision: integer("revision").notNull().default(1), createdAt: text("created_at").notNull(),
 });
@@ -124,7 +125,11 @@ export const productAssignments = sqliteTable("product_assignments", {
 });
 export const productSubmissions = sqliteTable("product_submissions", {
   id: text("id").primaryKey(), studentId: text("student_id").notNull(), submittedBy: text("submitted_by").notNull(), classId: text("class_id").references(() => productClasses.id), assignmentId: text("assignment_id").references(() => productAssignments.id), billingUserId: text("billing_user_id").notNull(), data: text("data").notNull(), revision: integer("revision").notNull().default(1), clientRequestId: text("client_request_id").notNull(), createdAt: text("created_at").notNull(),
-}, table => [uniqueIndex("product_submission_request_unique").on(table.submittedBy, table.clientRequestId)]);
+}, table => [
+  uniqueIndex("product_submission_request_unique").on(table.submittedBy, table.clientRequestId),
+  index("product_submissions_created").on(table.createdAt, table.id),
+  index("product_submissions_student_created").on(table.studentId, table.createdAt, table.id),
+]);
 export const productFiles = sqliteTable("product_files", {
   id: text("id").primaryKey(), ownerId: text("owner_id").notNull(), examId: text("exam_id").references(() => productExams.id), submissionId: text("submission_id").references(() => productSubmissions.id), objectKey: text("object_key").notNull(), role: text("role").notNull(), data: text("data").notNull(),
 });
@@ -142,7 +147,7 @@ export const productContributions = sqliteTable("product_contributions", {
 }, table => [uniqueIndex("product_contribution_source_unique").on(table.sourceExamId), uniqueIndex("product_contribution_hash_unique").on(table.contentHash)]);
 export const productPoints = sqliteTable("product_points", {
   id: text("id").primaryKey(), userId: text("user_id").notNull(), contributionId: text("contribution_id").notNull().references(() => productContributions.id), amount: integer("amount").notNull(), policyVersion: text("policy_version").notNull(), createdAt: text("created_at").notNull(),
-}, table => [uniqueIndex("product_point_contribution_unique").on(table.contributionId)]);
+}, table => [uniqueIndex("product_point_contribution_unique").on(table.contributionId), index("product_points_user").on(table.userId)]);
 export const productImports = sqliteTable("product_imports", {
   contributionId: text("contribution_id").notNull().references(() => productContributions.id), userId: text("user_id").notNull(), examId: text("exam_id").notNull().references(() => productExams.id),
 }, table => [primaryKey({ columns: [table.contributionId, table.userId] }), uniqueIndex("product_import_exam_unique").on(table.examId)]);
@@ -173,7 +178,7 @@ export const productNotifications = sqliteTable("product_notifications", {
 }, table => [uniqueIndex("product_notification_event_unique").on(table.userId,table.channel,table.eventKey)]);
 export const productPointEvents = sqliteTable("product_point_events", {
   id: text("id").primaryKey(), userId: text("user_id").notNull(), contributionId: text("contribution_id"), learnerId: text("learner_id"), kind: text("kind").notNull(), amount: integer("amount").notNull(), policyVersion: text("policy_version").notNull(), createdAt: text("created_at").notNull(),
-}, table => [uniqueIndex("product_point_usage_unique").on(table.contributionId,table.learnerId,table.kind)]);
+}, table => [uniqueIndex("product_point_usage_unique").on(table.contributionId,table.learnerId,table.kind), index("product_point_events_user").on(table.userId)]);
 export const productExamRequests = sqliteTable("product_exam_requests", {
   userId: text("user_id").notNull(), requestId: text("request_id").notNull(), examId: text("exam_id").notNull().references(() => productExams.id),
 }, table => [primaryKey({columns:[table.userId,table.requestId]})]);
@@ -187,3 +192,23 @@ export const productPhoneChallenges = sqliteTable("product_phone_challenges", {
 export const productPhoneCooldowns = sqliteTable("product_phone_cooldowns", {
   userId:text("user_id").primaryKey(), expiresAt:integer("expires_at").notNull(),
 });
+
+// Management records also support profiles created before the current login system.
+export const productAdminCustomers = sqliteTable("product_admin_customers", {
+  userId: text("user_id").primaryKey(),
+  status: text("status").notNull(),
+  note: text("note").notNull(),
+  revision: integer("revision").notNull(),
+  updatedAt: text("updated_at").notNull(),
+  lastEventId: text("last_event_id").notNull(),
+}, table => [check("product_admin_customer_status", sql`${table.status} IN ('new', 'active', 'follow_up', 'closed')`)]);
+
+export const productAdminCustomerEvents = sqliteTable("product_admin_customer_events", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => productAdminCustomers.userId),
+  status: text("status").notNull(),
+  revision: integer("revision").notNull(),
+  actorId: text("actor_id").notNull(),
+  actorName: text("actor_name").notNull(),
+  createdAt: text("created_at").notNull(),
+}, table => [uniqueIndex("product_admin_event_customer_revision").on(table.userId, table.revision)]);

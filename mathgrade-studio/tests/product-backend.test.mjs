@@ -45,7 +45,7 @@ function fixture(t) {
       sqlite.exec('BEGIN');
       try {
         const results = [];
-        for (const entry of statements) results.push(/^SELECT/i.test(entry.sql) ? await entry.all() : await entry.run());
+        for (const entry of statements) results.push(/^\s*(SELECT|WITH)\b/i.test(entry.sql) ? await entry.all() : await entry.run());
         sqlite.exec('COMMIT'); return results;
       } catch (error) { sqlite.exec('ROLLBACK'); throw error; }
     });
@@ -64,6 +64,8 @@ function fixture(t) {
     const method = options.method ?? (body === undefined ? 'GET' : 'POST');
     const headers = new Headers({ origin: options.origin ?? 'https://example.test' });
     if (user) { headers.set('oai-authenticated-user-id',user); headers.set('oai-authenticated-user-full-name',encodeURIComponent(`이름 ${user}`)); headers.set('oai-authenticated-user-full-name-encoding','percent-encoded-utf-8'); }
+    if (options.email) headers.set('oai-authenticated-user-email', options.email);
+    if (options.noOrigin) headers.delete('origin');
     if (options.cookie) headers.set('cookie',options.cookie);
     if (body !== undefined && !(body instanceof FormData)) headers.set('content-type','application/json');
     const response = await routeApi(new Request(`https://example.test${path.startsWith('/api/') ? path : '/api/product/'+path}`, {
@@ -515,4 +517,60 @@ test('free trial cannot access premium materials, class proxy submissions or cha
   const sub=await trialSubmission(f,'teacher','paid-owner-free');await ingestAnalysisResult(f.db,sub.id,1,result());
   assert.equal((await f.ok('state','teacher')).entitlement.used,0);assert.equal((await f.ok('state','teacher')).phoneTrial.remaining,0);
   assert.equal((await f.call(`submissions/${sub.id}`,'outsider')).status,403);
+});
+
+test('the administrator uses the Sites owner identity and cannot be reached through a customer session', async t => {
+  const f = fixture(t);
+  const dashboard = '/api/admin/dashboard';
+  const owner = { email: 'owner@example.test' };
+  assert.equal((await f.call(dashboard, 'owner', undefined, owner)).status, 403);
+  runtime.ADMIN_OWNER_EMAIL = 'owner@example.test';
+  runtime.ADMIN_SITE_ORIGIN = 'https://example.test';
+  assert.equal((await f.call(dashboard, null, undefined, owner)).status, 401);
+  assert.equal((await f.call(dashboard, 'teacher', undefined, { email: 'teacher@example.test' })).status, 403);
+  const customerSession = await f.call('auth/signup', null, { username: 'admin_route_check', password: 'unique-password-example', displayName: '일반 고객', accountType: 'personal' });
+  assert.equal(customerSession.status, 200);
+  const cookie = customerSession.headers.get('set-cookie')?.split(';')[0];
+  assert.ok(cookie);
+  assert.equal((await f.call(dashboard, null, undefined, { cookie })).status, 401);
+  runtime.ADMIN_SITE_ORIGIN = 'https://other-website.test';
+  assert.equal((await f.call(dashboard, 'owner', undefined, owner)).status, 403);
+  runtime.ADMIN_SITE_ORIGIN = 'https://example.test';
+  f.sqlite.prepare('INSERT INTO product_users (id,name,created_at) VALUES (?,?,?)').run('pending-profile', '가입 유형 선택 대기', timestamp);
+  const managed = await f.base();
+  const submission = await f.submit('student', managed.work.id);
+  const overview = await f.call(dashboard, 'owner', undefined, owner);
+  assert.equal(overview.status, 200);
+  assert.equal(overview.headers.get('cache-control'), 'no-store');
+  assert.equal(overview.value.metrics.customers, 5);
+  assert.equal(overview.value.metrics.classes, 1);
+  assert.equal(overview.value.metrics.submissions, 1);
+  assert.equal(overview.value.recentSubmissions[0].id, submission.id);
+  const directory = await f.call('/api/admin/customers?query=student&role=academy_student', 'owner', undefined, owner);
+  assert.equal(directory.status, 200);
+  assert.deepEqual(directory.value.items.map(item => item.id), ['student']);
+  const signedUp = await f.call('/api/admin/customers?query='+encodeURIComponent('가입 유형'), 'owner', undefined, owner);
+  assert.equal(signedUp.value.total, 1);
+  assert.equal(signedUp.value.items[0].role, null);
+  const path = '/api/admin/customers/student';
+  const details = await f.call(path, 'owner', undefined, owner);
+  assert.equal(details.status, 200);
+  assert.equal(details.value.memberships[0].name, managed.room.name);
+  assert.equal(details.value.recentSubmissions[0].id, submission.id);
+  for (const word of ['왜 감점되나요?', '/api/product/files/', 'passwordHash', 'phoneHash']) {
+    assert.equal(JSON.stringify(details.value).includes(word), false);
+  }
+  const update = { status: 'follow_up', note: '참여코드 안내 확인', revision: details.value.customer.revision };
+  assert.equal((await f.call(path, 'owner', update, { ...owner, noOrigin: true })).status, 403);
+  assert.equal((await f.call(path, 'owner', update, { ...owner, origin: 'https://other.test' })).status, 403);
+  const saved = await f.call(path, 'owner', update, owner);
+  assert.equal(saved.status, 200);
+  assert.equal(saved.value.customer.status, 'follow_up');
+  assert.equal(saved.value.customer.note, '참여코드 안내 확인');
+  assert.equal(saved.value.history.length, 1);
+  assert.equal((await f.call(path, 'owner', update, owner)).status, 409);
+  const filtered = await f.call('/api/admin/customers?status=follow_up', 'owner', undefined, owner);
+  assert.deepEqual(filtered.value.items.map(item => item.id), ['student']);
+  assert.equal((await f.call('state', 'student')).value.profile.accountType, 'academy_student');
+  assert.equal((await f.call('state', 'student')).value.entitlement, null);
 });
