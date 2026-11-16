@@ -713,6 +713,8 @@ test('the administrator uses the Sites owner identity and cannot be reached thro
   const f = fixture(t);
   const directoryPath = '/api/admin/customers';
   const owner = { email: 'owner@example.test' };
+  const adminAccess = '/api/admin/access';
+  assert.equal((await f.call(adminAccess, 'owner', undefined, owner)).status, 403);
   assert.equal((await f.call(directoryPath, 'owner', undefined, owner)).status, 403);
   runtime.ADMIN_OWNER_EMAIL = 'owner@example.test';
   runtime.ADMIN_SITE_ORIGIN = 'https://example.test';
@@ -728,6 +730,16 @@ test('the administrator uses the Sites owner identity and cannot be reached thro
   runtime.ADMIN_SITE_ORIGIN = 'https://example.test';
   f.sqlite.prepare('INSERT INTO product_users (id,name,created_at) VALUES (?,?,?)').run('pending-profile', '가입 유형 선택 대기', timestamp);
   const managed = await f.base();
+  assert.equal((await f.call(adminAccess, null)).status, 401);
+  for (const customer of ['teacher', 'student']) {
+    const access = await f.call(adminAccess, customer, undefined, { email: `${customer}@example.test` });
+    assert.equal(access.status, 403);
+    assert.equal(Object.hasOwn(access.value, 'allowed'), false);
+  }
+  const access = await f.call(adminAccess, 'owner', undefined, owner);
+  assert.equal(access.status, 200);
+  assert.deepEqual(access.value, { allowed: true });
+  assert.equal(access.headers.get('cache-control'), 'no-store');
   const submission = await f.submit('student', managed.work.id);
   assert.equal((await f.call('/api/admin/dashboard', 'owner', undefined, owner)).status, 404);
   const directory = await f.call('/api/admin/customers?query=student&role=academy_student', 'owner', undefined, owner);
