@@ -14,6 +14,15 @@ export type AdminCustomerList = {
   page: number;
   pageSize: number;
   total: number;
+  counts: AdminCustomerCounts;
+};
+
+export type AdminCustomerCounts = {
+  teacher: number;
+  academyStudent: number;
+  personal: number;
+  unassigned: number;
+  total: number;
 };
 
 export type AdminCustomerDetail = {

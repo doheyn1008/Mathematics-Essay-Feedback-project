@@ -1,3 +1,4 @@
+import { canContinueSiteAccount, provisionSiteAccount, siteIngressIdentity } from "./product-site-session";
 import { handleRecovery, resetPassword, securityProof } from "./product-security";
 import { env } from "cloudflare:workers";
 import { randomBytes, scrypt, timingSafeEqual } from "node:crypto";
@@ -104,13 +105,29 @@ async function oauth(request: Request, provider: "google" | "kakao", callback: b
   response.headers.append("Set-Cookie",cookie(request,"mg_oauth","",0));
   return response;
 }
+async function isClosedSiteAccount(request: Request, db: D1Database): Promise<boolean> {
+  const id = siteIngressIdentity(request)?.id;
+  if (!id) return false;
+  return Boolean(await db.prepare("SELECT user_id FROM product_closed_accounts WHERE user_id=?").bind(id).first());
+}
+
 export async function handleLogin(request: Request, path: string): Promise<Response> {
-  if (request.method === "GET" && path === "providers") return productJson(authProviders());
+  if (request.method === "GET" && path === "providers") {
+    const legacySiteAccount = await canContinueSiteAccount(request) && !await isClosedSiteAccount(request, productDatabase());
+    return productJson({ ...authProviders(), legacySiteAccount });
+  }
   const provider = path.match(/^(google|kakao)(\/callback)?$/);
   if (request.method === "GET" && provider) return oauth(request,provider[1] as "google"|"kakao",Boolean(provider[2]));
   if (request.method !== "POST") throw new HttpError(404,"요청한 기능을 찾을 수 없습니다.");
   checkProductOrigin(request);
   const db = productDatabase();
+  if (path === "site-session") {
+    if (request.headers.get("origin") !== new URL(request.url).origin) {
+      throw new HttpError(403, "수식채점실 로그인 화면에서 다시 시도해 주세요.");
+    }
+    if (await isClosedSiteAccount(request, db)) throw new HttpError(403, "탈퇴한 계정입니다.");
+    return session(request, await provisionSiteAccount(request, db));
+  }
   if (path === "logout") {
     const token = request.headers.get("cookie")?.match(/(?:^|;\s*)mg_session=([a-f0-9]{64})(?:;|$)/)?.[1];
     if (token) await db.prepare("DELETE FROM product_sessions WHERE token_hash = ?").bind(await tokenHash(token)).run();

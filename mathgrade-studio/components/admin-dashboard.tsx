@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { ArrowLeft, ArrowUpRight, ChevronLeft, ChevronRight, LockKeyhole, RefreshCw, Search, Users } from "lucide-react";
-import type { AdminCustomerDetail, AdminCustomerList, CustomerRole } from "@/lib/admin-types";
+import type { AdminCustomerCounts, AdminCustomerDetail, AdminCustomerList, CustomerRole } from "@/lib/admin-types";
 
 const roleLabels: Record<CustomerRole, string> = {
   teacher: "선생님",
@@ -47,7 +47,7 @@ function isAccessError(error: AdminApiError | null): error is AdminApiError {
   return error?.status === 401 || error?.status === 403;
 }
 
-type QueryResult<T> = { data: T | null; error: AdminApiError | null; loading: boolean };
+type QueryResult<T> = { data: T | null; lastData: T | null; error: AdminApiError | null; loading: boolean };
 
 function useAdminQuery<T>(path: string, refresh: number, onAuthError: (error: AdminApiError) => void): QueryResult<T> {
   const key = `${path}:${refresh}`;
@@ -70,8 +70,8 @@ function useAdminQuery<T>(path: string, refresh: number, onAuthError: (error: Ad
     return () => controller.abort();
   }, [path, key, onAuthError]);
 
-  if (result?.key !== key) return { data: null, error: null, loading: true };
-  return { data: result.data, error: result.error, loading: false };
+  if (result?.key !== key) return { data: null, lastData: result?.data ?? null, error: null, loading: true };
+  return { data: result.data, lastData: result.data, error: result.error, loading: false };
 }
 
 function formatDate(value: string | null): string {
@@ -118,6 +118,27 @@ function AccessView({ error, signInUrl }: { error: AdminApiError; signInUrl: str
   );
 }
 
+function CustomerCounts({ counts }: { counts: AdminCustomerCounts }) {
+  const metrics = [
+    { label: "전체 회원", count: counts.total },
+    { label: "학원용 선생님", count: counts.teacher },
+    { label: "학원 학생", count: counts.academyStudent },
+    { label: "개인 학습자", count: counts.personal },
+    { label: "유형 미등록", count: counts.unassigned },
+  ];
+
+  return (
+    <dl className="mg-admin-counts" aria-label="계정 유형별 전체 회원 수">
+      {metrics.map(({ label, count }) => (
+        <div key={label}>
+          <dt>{label}</dt>
+          <dd>{numbers.format(count)}<span>명</span></dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
 function CustomerDirectory({ filters, updateFilters, onSelect, onAuthError }: {
   filters: Filters;
   updateFilters(filters: Filters): void;
@@ -127,7 +148,7 @@ function CustomerDirectory({ filters, updateFilters, onSelect, onAuthError }: {
   const [query, setQuery] = useState(filters.query);
   const [refresh, setRefresh] = useState(0);
   const params = new URLSearchParams({ query: filters.query, role: filters.role, page: String(filters.page) });
-  const { data, error, loading } = useAdminQuery<AdminCustomerList>(`/api/admin/customers?${params}`, refresh, onAuthError);
+  const { data, lastData, error, loading } = useAdminQuery<AdminCustomerList>(`/api/admin/customers?${params}`, refresh, onAuthError);
   const pageCount = data ? Math.max(1, Math.ceil(data.total / data.pageSize)) : 1;
 
   function search(event: FormEvent<HTMLFormElement>) {
@@ -138,6 +159,7 @@ function CustomerDirectory({ filters, updateFilters, onSelect, onAuthError }: {
   return (
     <>
       <h1 className="mg-admin-page-title">회원 관리</h1>
+      {lastData?.counts && <CustomerCounts counts={lastData.counts} />}
       <section className="mg-admin-card" aria-label="회원 목록">
         <form className="mg-admin-filter" onSubmit={search}>
           <label className="mg-admin-field search">
@@ -189,7 +211,7 @@ function CustomerDirectory({ filters, updateFilters, onSelect, onAuthError }: {
               <div className="mg-admin-state"><Users size={22} aria-hidden="true" /><p>{filters.query || filters.role ? "조건에 맞는 회원이 없습니다." : "아직 가입한 회원이 없습니다."}</p></div>
             )}
             <div className="mg-admin-pager">
-              <span role="status">회원 {numbers.format(data.total)}명</span>
+              {(filters.query || filters.role) && <span role="status">검색 결과 {numbers.format(data.total)}명</span>}
               <div className="mg-admin-pager-buttons">
                 <button type="button" className="mg-admin-button small" aria-label="이전 페이지" disabled={data.page <= 1} onClick={() => updateFilters({ ...filters, page: data.page - 1 })}><ChevronLeft size={15} aria-hidden="true" /></button>
                 <span>{numbers.format(data.page)} / {numbers.format(pageCount)}</span>

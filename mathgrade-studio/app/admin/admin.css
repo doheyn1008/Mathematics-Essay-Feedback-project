@@ -26,6 +26,11 @@
 .mg-admin-content { padding-block: 35px 42px; }
 .mg-admin-content:focus { outline: none; }
 .mg-admin h1.mg-admin-page-title { margin-bottom: 22px; }
+.mg-admin dl.mg-admin-counts { display: grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: 10px; margin-bottom: 16px; }
+.mg-admin-counts > div { padding: 12px 15px; border: 1px solid var(--ad-border); border-radius: 10px; background: #fff; }
+.mg-admin-counts dt { font-size: 12px; font-weight: 650; }
+.mg-admin-counts dd { margin-top: 3px; font-size: 24px; font-weight: 750; line-height: 1.25; font-variant-numeric: tabular-nums; }
+.mg-admin-counts dd span { margin-left: 3px; font-size: 12px; font-weight: 600; }
 .mg-admin-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 39px; padding: 8px 12px; border: 1px solid var(--ad-border); border-radius: 8px; background: #fff; color: inherit; font-size: 13px; font-weight: 690; white-space: nowrap; }
 .mg-admin-button:hover:not(:disabled) { background: #f3eff8; }
 .mg-admin-button.primary { background: #5c3c91; border-color: #5c3c91; color: #fff; }
@@ -55,6 +60,7 @@
 .mg-admin-cell-sub { display: block; margin-top: 4px; font-size: 11px; line-height: 1.4; }
 .mg-admin-pager { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 13px 17px; border-top: 1px solid var(--ad-border); font-size: 12px; }
 .mg-admin-pager-buttons, .mg-admin-actions { display: flex; align-items: center; gap: 8px; }
+.mg-admin-pager-buttons { margin-inline-start: auto; }
 .mg-admin-actions { flex-wrap: wrap; }
 .mg-admin-state { display: grid; justify-items: center; gap: 10px; text-align: center; padding: 31px 15px; line-height: 1.55; }
 .mg-admin-state svg { color: var(--ad-accent); }

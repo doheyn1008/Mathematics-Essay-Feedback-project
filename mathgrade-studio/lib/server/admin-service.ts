@@ -1,5 +1,6 @@
 import type {
   AdminCustomer,
+  AdminCustomerCounts,
   AdminCustomerDetail,
   AdminCustomerList,
   CustomerRole,
@@ -95,13 +96,26 @@ async function customerList(db: D1Database, { query, role, page }: Filters): Pro
       AND (? = '' OR COALESCE(role, 'unassigned') = ?)
   `;
   const bindings = [query, query, query, role, role];
-  const [items, count] = await db.batch([
+  const [items, count, totals] = await db.batch([
     db.prepare(`${accountRows} SELECT ${customerColumns}
       FROM customers ${where} ORDER BY createdAt DESC, id DESC LIMIT ? OFFSET ?`)
       .bind(...bindings, pageSize, (page - 1) * pageSize),
     db.prepare(`${accountRows} SELECT COUNT(*) AS total FROM customers ${where}`).bind(...bindings),
+    db.prepare(`${accountRows}
+      SELECT COUNT(*) AS total,
+        COUNT(CASE WHEN role = 'teacher' THEN 1 END) AS teacher,
+        COUNT(CASE WHEN role = 'academy_student' THEN 1 END) AS academyStudent,
+        COUNT(CASE WHEN role = 'personal' THEN 1 END) AS personal,
+        COUNT(CASE WHEN role IS NULL THEN 1 END) AS unassigned
+      FROM accounts`),
   ]);
-  return { items: asRows<AdminCustomer>(items), page, pageSize, total: asRows<{ total: number }>(count)[0].total };
+  return {
+    items: asRows<AdminCustomer>(items),
+    page,
+    pageSize,
+    total: asRows<{ total: number }>(count)[0].total,
+    counts: asRows<AdminCustomerCounts>(totals)[0],
+  };
 }
 
 async function customerDetail(db: D1Database, id: string): Promise<AdminCustomerDetail> {

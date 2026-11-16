@@ -745,6 +745,8 @@ test('the administrator uses the Sites owner identity and cannot be reached thro
   const directory = await f.call('/api/admin/customers?query=student&role=academy_student', 'owner', undefined, owner);
   assert.equal(directory.status, 200);
   assert.deepEqual(directory.value.items.map(item => item.id), ['student']);
+  assert.equal(directory.value.total, 1);
+  assert.deepEqual(directory.value.counts, { teacher: 1, academyStudent: 2, personal: 1, unassigned: 1, total: 5 });
   const signedUp = await f.call('/api/admin/customers?query='+encodeURIComponent('가입 유형'), 'owner', undefined, owner);
   assert.equal(signedUp.value.total, 1);
   assert.equal(signedUp.value.items[0].role, null);
@@ -837,3 +839,28 @@ test('member type changes preserve class access and active billing', async t => 
   assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS total FROM product_admin_customer_events WHERE user_id IN (?,?)').get('teacher', 'paid-personal').total, 0);
 });
 
+
+test('verified existing Sites members can resume the same profile through explicit sign-in', async t => {
+  const f = fixture(t);
+  await f.register('existing-teacher', 'teacher', true);
+  delete runtime.PRODUCT_HOST_LOGIN;
+  const host = { email: 'legacy@example.test' };
+  const providers = await f.call('auth/providers', 'existing-teacher', undefined, host);
+  assert.equal(providers.value.legacySiteAccount, false);
+  runtime.ADMIN_SITE_ORIGIN = 'https://example.test';
+  assert.equal((await f.call('auth/providers', 'existing-teacher', undefined, host)).value.legacySiteAccount, true);
+  assert.equal((await f.call('auth/providers', 'unknown-sites-user', undefined, host)).value.legacySiteAccount, false);
+  assert.equal((await f.call('state', 'existing-teacher', undefined, host)).value.user, null);
+  assert.equal((await f.call('auth/site-session', 'unknown-sites-user', {}, host)).status, 403);
+  assert.equal((await f.call('auth/site-session', 'existing-teacher', {}, { ...host, origin: 'https://other.test' })).status, 403);
+  const first = await f.call('auth/site-session', 'existing-teacher', {}, host);
+  assert.equal(first.status, 200, JSON.stringify(first.value));
+  const cookie = first.headers.get('set-cookie').split(';')[0];
+  const previous = await f.call('state', null, undefined, { cookie });
+  assert.equal(previous.value.user.id, 'existing-teacher');
+  assert.equal(previous.value.profile.accountType, 'teacher');
+  assert.equal(previous.value.entitlement.plan, 'teacher');
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS count FROM product_users WHERE id=?').get('existing-teacher').count, 1);
+  assert.equal((await f.call('auth/logout', null, {}, { cookie })).status, 200);
+  assert.equal((await f.call('state', 'existing-teacher', undefined, { ...host, cookie })).value.user, null);
+});
