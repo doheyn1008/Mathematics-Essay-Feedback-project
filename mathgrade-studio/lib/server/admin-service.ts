@@ -236,7 +236,7 @@ function readCustomerId(segment: string): string {
 }
 
 export async function handleAdminApi(request: Request, path: string): Promise<Response> {
-  const actor = requireAdmin(request);
+  const actor = await requireAdmin(request);
   if (request.method === "GET" && path === "access") {
     return productJson({ allowed: true });
   }

@@ -888,3 +888,42 @@ test('public Worker ingress rejects forged Sites login and administrator headers
   assert.notEqual(state.value.user.id, 'existing-owner');
   assert.equal((await f.call('/api/admin/access', 'existing-owner', undefined, { ...forged, cookie })).status, 401);
 });
+
+test('Workers administration requires the configured owner session and exact HTTPS origin, never role or asserted identity', async t => {
+  const f = fixture(t);
+  runtime.DEPLOYMENT_TARGET = 'cloudflare';
+  runtime.ADMIN_SITE_ORIGIN = 'https://example.test';
+  runtime.ADMIN_OWNER_EMAIL = 'same@example.test';
+  const owner = await f.call('auth/signup', null, {username:'worker_owner', password:'owner-password-example', displayName:'운영자', accountType:'personal'});
+  assert.equal(owner.status, 200);
+  const ownerCookie = owner.headers.get('set-cookie').split(';')[0];
+  const ownerId = (await f.call('state', null, undefined, {cookie:ownerCookie})).value.user.id;
+  const teacher = await f.call('auth/signup', null, {username:'worker_teacher', password:'teacher-password-example', displayName:'선생님', accountType:'teacher'});
+  assert.equal(teacher.status, 200);
+  const teacherCookie = teacher.headers.get('set-cookie').split(';')[0];
+  const teacherId = (await f.call('state', null, undefined, {cookie:teacherCookie})).value.user.id;
+
+  assert.equal((await f.call('/api/admin/access', null, undefined, {cookie:ownerCookie})).value.code, 'ADMIN_NOT_CONFIGURED');
+  runtime.ADMIN_OWNER_USER_ID = ownerId;
+  assert.equal((await f.call('/api/admin/access', ownerId, undefined, {email:'same@example.test'})).status, 401);
+  assert.equal((await f.call('/api/admin/access', ownerId, undefined, {cookie:teacherCookie,email:'same@example.test'})).status, 403);
+  assert.deepEqual((await f.call('/api/admin/access', null, undefined, {cookie:ownerCookie})).value, {allowed:true});
+  const detail = await f.call(`/api/admin/customers/${teacherId}`, null, undefined, {cookie:ownerCookie});
+  assert.equal(detail.status, 200);
+  const change = {role:'personal', revision:detail.value.customer.revision};
+  assert.equal((await f.call(`/api/admin/customers/${teacherId}`, null, change, {cookie:ownerCookie,noOrigin:true})).status, 403);
+  assert.equal((await f.call(`/api/admin/customers/${teacherId}`, null, change, {cookie:ownerCookie,origin:'https://other.test'})).status, 403);
+  assert.equal((await f.call(`/api/admin/customers/${teacherId}`, null, change, {cookie:ownerCookie})).status, 200);
+  assert.equal(f.sqlite.prepare('SELECT actor_id FROM product_admin_customer_events WHERE user_id=?').get(teacherId).actor_id, ownerId);
+  assert.equal((await f.call('/api/admin/access', null, undefined, {cookie:teacherCookie})).status, 403, 'changing a customer role never grants ownership');
+
+  runtime.ADMIN_SITE_ORIGIN = 'https://different.test';
+  assert.equal((await f.call('/api/admin/access', null, undefined, {cookie:ownerCookie})).status, 403);
+  runtime.ADMIN_SITE_ORIGIN = 'https://example.test';
+  await f.call('auth/logout', null, {}, {cookie:ownerCookie});
+  assert.equal((await f.call('/api/admin/access', null, undefined, {cookie:ownerCookie})).status, 401);
+  const login = await f.call('auth/login', null, {username:'worker_owner',password:'owner-password-example'});
+  const renewedCookie = login.headers.get('set-cookie').split(';')[0];
+  f.sqlite.prepare('UPDATE product_sessions SET expires_at=? WHERE user_id=?').run('2000-01-01T00:00:00.000Z',ownerId);
+  assert.equal((await f.call('/api/admin/access', null, undefined, {cookie:renewedCookie})).status, 401);
+});

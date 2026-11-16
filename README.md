@@ -29,4 +29,6 @@ npm run deploy:check
 
 일반 Workers가 기본 대상이며, 기존 ChatGPT Sites 경로는 `npm run dev:sites`와 `npm run build:sites`로 명시적으로 선택합니다. Sites 프로젝트 설정과 데이터는 자동 이전되지 않습니다.
 
-자체 가입·로그인·파일 저장 기능이 구현되어 있습니다. 실제 AI 첨삭·결제·SMS·소셜 로그인은 각각 운영 연결이 필요합니다. Sites 기반 관리자 인증은 일반 Workers에서 비활성화됩니다. [앱 설명](mathgrade-studio/README.md)에서 동작 범위를 확인하세요.
+자체 가입·로그인·파일 저장 기능이 구현되어 있습니다. 실제 AI 첨삭·결제·SMS·소셜 로그인은 각각 운영 연결이 필요합니다. Workers 관리자는 서버에 지정한 회원 ID와 유효한 회원 세션으로 인증합니다. [앱 설명](mathgrade-studio/README.md)에서 동작 범위를 확인하세요.
+
+VS Code에서 가져오기, 내 계정의 관리자 권한 설정, 회원 관리, 첫 배포와 수정 후 반영 순서는 [운영 가이드](docs/OPERATIONS.md)에 정리했습니다.

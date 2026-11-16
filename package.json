@@ -7,9 +7,11 @@
   "scripts": {
     "install:app": "npm --prefix mathgrade-studio ci",
     "dev": "npm --prefix mathgrade-studio run dev",
+    "dev:sites": "npm --prefix mathgrade-studio run dev:sites",
     "check": "npm --prefix mathgrade-studio run check",
     "test": "npm --prefix mathgrade-studio test",
     "build": "npm --prefix mathgrade-studio run build",
+    "build:sites": "npm --prefix mathgrade-studio run build:sites",
     "start": "npm --prefix mathgrade-studio start",
     "deploy:check": "npm --prefix mathgrade-studio run deploy:check",
     "deploy": "npm --prefix mathgrade-studio run deploy"

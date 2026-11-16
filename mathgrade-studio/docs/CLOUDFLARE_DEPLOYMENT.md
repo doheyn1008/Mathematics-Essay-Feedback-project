@@ -11,7 +11,7 @@
 
 Workers 빌드에는 Sites 프로젝트 식별자와 connector preview 서비스가 포함되지 않습니다. Worker 진입점이 외부의 `oai-authenticated-user-*` 헤더를 제거하므로 임의의 ChatGPT 계정 사칭은 회원·관리자 인증이 되지 않습니다. 자체 아이디·비밀번호와 설정된 OAuth 로그인을 이용합니다.
 
-기존 `/admin`은 신뢰된 Sites ingress 전용입니다. **이번 Workers 준비에는 관리자 인증 이전을 포함하지 않습니다.** `ADMIN_OWNER_EMAIL`, `ADMIN_SITE_ORIGIN`, `PRODUCT_HOST_LOGIN=true`를 Workers에 복사해 관리자 인증을 활성화하려고 하지 마세요. 회원 세션 기반의 별도 관리자 권한 또는 검증된 Cloudflare Access 연동은 후속 구현이 필요합니다. Sites 방문 제한 역시 Workers에 자동 적용되지 않습니다. 비공개 테스트가 필요하면 배포 전에 Cloudflare Access 등의 접근 제한을 설정합니다.
+Workers의 `/admin`은 서버에 설정한 `ADMIN_OWNER_USER_ID`와 유효한 회원 세션을 사용합니다. `ADMIN_SITE_ORIGIN`에는 현재 접속하는 HTTPS 원점을 지정합니다. 두 설정이 없으면 관리자 API는 닫혀 있습니다. [관리자 설정](ADMIN.md)과 [운영 가이드](../../docs/OPERATIONS.md)에 자신의 회원 ID를 확인해 권한을 설정하는 순서를 정리했습니다. `ADMIN_OWNER_EMAIL`과 `PRODUCT_HOST_LOGIN=true`는 Workers 관리자 설정에 사용하지 않습니다. Sites 방문 제한은 Workers에 자동 적용되지 않습니다. 비공개 테스트가 필요하면 배포 전에 Cloudflare Access 등의 접근 제한을 설정합니다.
 
 ## 1. D1·R2 생성과 로컬 검사
 
@@ -46,7 +46,7 @@ npm run deploy
 
 `deploy`는 새로 빌드하고 Cloudflare용 산출물인지 확인한 뒤 Wrangler로 업로드합니다. 예시 D1 UUID가 남았거나 Sites 빌드이면 배포를 거부합니다. `deploy:check`는 자격증명 없이 패키징만 검사하며 DB·버킷의 실제 존재나 원격 기능을 확인하지 않습니다.
 
-처음에는 Cloudflare가 반환한 `https://Worker이름.계정서브도메인.workers.dev` 주소로 확인합니다. 가입 → 로그인 → 새로고침 후 세션 유지 → 로그아웃, 허용된 시험/답안 업로드와 본인 파일 조회를 검증합니다. 다른 회원 파일 접근, 임의 ChatGPT 인증 헤더, `/api/admin/access` 접근이 거부되는지도 확인합니다. 유료 이용권·AI·문자 인증은 별도 연결 전에는 완료로 간주하지 않습니다.
+처음에는 Cloudflare가 반환한 `https://Worker이름.계정서브도메인.workers.dev` 주소로 확인합니다. 가입 → 로그인 → 새로고침 후 세션 유지 → 로그아웃, 허용된 시험/답안 업로드와 본인 파일 조회를 검증합니다. 다른 회원 파일 접근과 임의 ChatGPT 인증 헤더를 통한 인증이 거부되는지도 확인합니다. 관리자 설정 후 소유자만 `/api/admin/access`에서 200을 받고 일반 회원은 거부되어야 합니다. 유료 이용권·AI·문자 인증은 별도 연결 전에는 완료로 간주하지 않습니다.
 
 ## Git 연결 빌드
 
@@ -55,7 +55,6 @@ Cloudflare Workers Builds에서 저장소를 연결한다면 다음과 같이 �
 | 설정 | 값 |
 | --- | --- |
 | Root directory | `mathgrade-studio` |
-| Install command | `npm ci` |
 | Build command | `npm run build` |
 | Deploy command | `node scripts/deploy-cloudflare.mjs` |
 | Production branch | `main` |
