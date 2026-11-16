@@ -141,19 +141,45 @@ export async function runNpmInstall(command, cacheSeed = "not_applicable") {
   }
   const progress = new NpmCacheProgress(registry);
   let receivedSignal;
+  let child;
+  let forwardedSignal;
+  let killTimer;
+  const isolatedGroup = process.platform !== "win32";
+  const signalChild = (signal) => {
+    if (!child?.pid || (!isolatedGroup && (child.exitCode !== null || child.signalCode !== null))) return;
+    try {
+      if (isolatedGroup) process.kill(-child.pid, signal);
+      else child.kill(signal);
+    } catch (error) {
+      if (error.code !== "ESRCH") throw error;
+    }
+  };
+  const cancel = () => {
+    if (!receivedSignal || !child?.pid || forwardedSignal) return;
+    forwardedSignal = receivedSignal;
+    signalChild(receivedSignal);
+    // Cancellation must not leave a stubborn npm process or lifecycle child behind.
+    killTimer = setTimeout(() => signalChild("SIGKILL"), 5000);
+    killTimer.unref();
+  };
   const handlers = ["SIGINT", "SIGHUP", "SIGTERM"].map((signal) => {
     const handler = () => {
       receivedSignal ??= signal;
+      cancel();
     };
     process.on(signal, handler);
     return [signal, handler];
   });
   let result = { code: 1, signal: null };
   try {
-    const child = spawn(executable, [...args, "--loglevel=http"], {
+    child = spawn(executable, [...args, "--loglevel=http"], {
       env,
       stdio: ["inherit", "inherit", "pipe"],
+      // Isolate npm's group so a supervisor's group signal reaches this handler
+      // once, then is forwarded once. PID-targeted cancellation works identically.
+      detached: isolatedGroup,
     });
+    cancel();
     const lines = createInterface({ input: child.stderr, crlfDelay: Infinity });
     lines.on("line", (line) => {
       progress.accept(line);
@@ -175,6 +201,7 @@ export async function runNpmInstall(command, cacheSeed = "not_applicable") {
     lines.close();
     if (startError) process.stderr.write("Unable to start npm.\n");
   } finally {
+    clearTimeout(killTimer);
     for (const [signal, handler] of handlers)
       process.removeListener(signal, handler);
     result.signal ??= receivedSignal;

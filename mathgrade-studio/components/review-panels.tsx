@@ -69,7 +69,7 @@ function RubricEditor({ submission, busy, onSave }: { submission: Submission; bu
   </div></section>;
 }
 
-export function ReviewCard({ submission, demo, busy, canReview, onSave, onPdf, onSetRubric }: {
+export function ReviewCard({ submission, demo, busy, canReview, onSave, onPdf, onSetRubric, saveError }: {
   submission: Submission;
   demo: boolean;
   busy: boolean;
@@ -77,6 +77,7 @@ export function ReviewCard({ submission, demo, busy, canReview, onSave, onPdf, o
   onSave: (submission: Submission, action: ReviewAction, review: EditableReview) => Promise<void>;
   onPdf: (submissions: Submission[]) => Promise<void>;
   onSetRubric?: SetRubric;
+  saveError?: string;
 }) {
   const approved = submission.status === "approved" && Boolean(submission.final);
   const current = approved ? submission.final : canReview ? submission.draft : null;
@@ -131,7 +132,7 @@ export function ReviewCard({ submission, demo, busy, canReview, onSave, onPdf, o
       </div>)}
       <label className="field">선생님 피드백{editable ? <textarea rows={5} value={feedback} maxLength={15000} disabled={disabled} placeholder="잘한 점, 보완할 점과 다음 풀이에서 기억할 내용을 적어 주세요." onChange={(event) => setFeedback(event.target.value)} /> : <p className="question-box" style={{whiteSpace:"pre-wrap",overflowWrap:"anywhere",fontWeight:450}}>{feedback || "추가 피드백이 없습니다."}</p>}</label>
       {submission.studentQuestion && <label className="field" style={{marginTop:16}}>추가 질문에 대한 답변{editable ? <textarea rows={5} value={questionResponse} maxLength={15000} disabled={disabled} placeholder="학생이 질문한 부분에 직접 답변해 주세요. 확정된 답변은 리포트와 PDF에 함께 표시됩니다." onChange={event => setQuestionResponse(event.target.value)} /> : <p className="question-box" style={{whiteSpace:"pre-wrap",overflowWrap:"anywhere",fontWeight:450}}>{questionResponse || "추가 질문의 답변이 기록되지 않았습니다."}</p>}</label>}
-      {error && <div className="form-error" role="alert" style={{marginTop:12}}>{error}</div>}
+      {(saveError || error) && <div className="form-error" role="alert" style={{marginTop:12}}>{saveError || error}</div>}
       <div className="actions">{approved ? <>{canReview && <button className="button secondary" disabled={disabled} onClick={() => save("reopen")}><RotateCcw />다시 검토</button>}<button className="button primary" disabled={disabled} onClick={download}><Download />PDF 저장 · 인쇄</button></> : <><button className="button secondary" disabled={disabled} onClick={() => save("draft")}><Save />초안 저장</button><button className="button primary" disabled={disabled} onClick={() => save("approve")}><CheckCheck />검토 확정</button></>}</div>
       {editable && <p className="muted" style={{marginTop:10}}>확정하면 학생에게 점수와 피드백이 공개됩니다.</p>}
     </div>

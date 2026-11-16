@@ -60,6 +60,9 @@ async function canViewSubmission(item: Submission, userId: string): Promise<bool
 }
 
 function decode<T>(row: { data: string }): T { return JSON.parse(row.data) as T; }
+function legacyStudentQuestion(question: Question): Question {
+  return { ...question, notes: "", criteria: question.criteria.map(criterion => ({ ...criterion, description: "" })), references: question.references?.filter(file => file.kind === "problem") };
+}
 
 async function fetchSubmission(id: string): Promise<Submission> {
   const row = await database().prepare("SELECT data, revision FROM submissions WHERE id = ?").bind(id).first<Row>();
@@ -70,7 +73,7 @@ async function fetchSubmission(id: string): Promise<Submission> {
 async function visibleSubmission(item: Submission, userId: string): Promise<Submission> {
   const teacher = item.academyId && await database().prepare("SELECT id FROM academies WHERE id = ? AND owner_id = ?").bind(item.academyId, userId).first();
   if (teacher) return item;
-  return { ...item, draft: null, final: item.status === "approved" ? item.final : null };
+  return { ...item, question: legacyStudentQuestion(item.question), draft: null, final: item.status === "approved" ? item.final : null };
 }
 
 async function workspaceState(request: Request): Promise<Response> {
@@ -78,7 +81,7 @@ async function workspaceState(request: Request): Promise<Response> {
   const day = seoulDay();
   const result: WorkspaceState = {
     user, academies: [], memberships: [], questions: [], assignments: [], submissions: [], admissions: [],
-    usage: { limit: 3, used: 0, remaining: 3, day }, ai: { configured: false }, storageReady: Boolean(env.DB && env.BUCKET),
+    usage: { limit: 0, used: 0, remaining: 0, day }, ai: { configured: false }, storageReady: Boolean(env.DB && env.BUCKET),
   };
   if (!user || !env.DB) return json(result);
   const db = database();
@@ -94,16 +97,23 @@ async function workspaceState(request: Request): Promise<Response> {
   result.academies = (values[0].results as unknown as Academy[]).map((item) => item.ownerId === user.id ? item : { ...item, joinCode: undefined });
   result.memberships = values[1].results as unknown as WorkspaceState["memberships"];
   result.questions = (values[2].results as unknown as Row[]).map((row) => ({ ...decode<Question>(row), revision: row.revision }));
-  result.assignments = (values[3].results as unknown as Row[]).map(decode<Assignment>);
   const owned = new Set(result.academies.filter((item) => item.ownerId === user.id).map((item) => item.id));
+  result.assignments = (values[3].results as unknown as Row[]).map(row => {
+    const item = decode<Assignment>(row);
+    return owned.has(item.academyId) ? item : { ...item, question: legacyStudentQuestion(item.question) };
+  });
   result.submissions = (values[4].results as unknown as Row[]).map((row) => {
     const item = { ...decode<Submission>(row), revision: row.revision };
-    return item.academyId && owned.has(item.academyId) ? item : { ...item, draft: null, final: item.status === "approved" ? item.final : null };
+    return item.academyId && owned.has(item.academyId) ? item : { ...item, question: legacyStudentQuestion(item.question), draft: null, final: item.status === "approved" ? item.final : null };
   });
   result.admissions = (values[5].results as unknown as Row[]).map(decode<AdmissionRecord>);
   result.usage.used = Number((values[6].results[0] as { used: number })?.used ?? 0);
   result.usage.remaining = Math.max(0, result.usage.limit - result.usage.used);
-  Object.assign(result, await getSharingState(db, user));
+  const legacySharing = await getSharingState(db, user);
+  // Historical contribution receipts remain available; the old teacher catalogue
+  // must not become an alternate premium-content endpoint.
+  result.sharedQuestions = legacySharing.sharedQuestions.filter(item => item.contributorId === user.id);
+  result.points = legacySharing.points;
   return json(result);
 }
 
@@ -194,7 +204,7 @@ async function validateFile(file: File): Promise<void> {
     "image/webp": ascii.startsWith("RIFF") && ascii.slice(8, 12) === "WEBP",
     "application/pdf": ascii.startsWith("%PDF-"),
   };
-  if (!types[file.type]) throw new HttpError(400, "유효한 JPG, PNG, WEBP 또는 PDF 파일을 첨부하세요.");
+  if (!Object.hasOwn(types, file.type) || types[file.type] !== true) throw new HttpError(400, "유효한 JPG, PNG, WEBP 또는 PDF 파일을 첨부하세요.");
 }
 
 async function createSubmission(request: Request, user: User): Promise<Response> {
@@ -259,6 +269,8 @@ async function createSubmission(request: Request, user: User): Promise<Response>
   };
   const attachment = prepareAttachment(file, "answers");
   const problemAttachment = prepareAttachment(problemFile, "problems");
+  // Keep an independent question reference when a file-only direct submission is reused.
+  if (direct && problemAttachment) question.references = [{ ...problemAttachment, kind: "problem", url: `/api/references/${problemAttachment.id}` }];
   const item: Submission = { id, studentId: user.id, studentCode, academyId, assignmentId, mode, question, answer, studentQuestion, attachment, problemAttachment, rubricPending: Boolean(question.rubricPending || !question.criteria.length), status: "pending", draft: null, final: null, revision: 1, createdAt: now, updatedAt: now };
   const uploadedKeys: string[] = [];
   try {
@@ -270,6 +282,10 @@ async function createSubmission(request: Request, user: User): Promise<Response>
     if (direct) writes.push(db.prepare("INSERT INTO questions (id, owner_id, academy_id, data, revision, created_at) VALUES (?, ?, ?, ?, ?, ?)").bind(question.id, user.id, null, JSON.stringify(question), 1, now));
     writes.push(db.prepare("INSERT INTO submissions (id, student_id, academy_id, assignment_id, mode, data, revision, client_request_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(id, user.id, academyId, assignmentId, mode, JSON.stringify(item), 1, clientRequestId, now));
     for (const upload of uploads) writes.push(db.prepare("INSERT INTO attachments (id, submission_id, object_key, name, content_type, size) VALUES (?, ?, ?, ?, ?, ?)").bind(upload.attachment.id, id, upload.key, upload.attachment.name, upload.attachment.type, upload.attachment.size));
+    if (direct && problemAttachment) {
+      const problemUpload = uploads.find(upload => upload.attachment.id === problemAttachment.id)!;
+      writes.push(db.prepare("INSERT INTO question_attachments (id, owner_id, question_id, object_key, name, content_type, size, kind, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(problemAttachment.id, user.id, question.id, problemUpload.key, problemAttachment.name, problemAttachment.type, problemAttachment.size, "problem", now));
+    }
     await db.batch(writes);
   } catch (error) {
     await Promise.all(uploadedKeys.map((key) => env.BUCKET!.delete(key)));
@@ -374,8 +390,12 @@ async function addQuestionReference(id: string, request: Request, user: User): P
 }
 
 async function questionReferenceResponse(id: string, user: User): Promise<Response> {
-  const reference = await database().prepare("SELECT object_key, name, content_type FROM question_attachments WHERE id = ? AND owner_id = ?").bind(id, user.id).first<{ object_key: string; name: string; content_type: string }>();
+  const reference = await database().prepare("SELECT object_key, name, content_type, owner_id, question_id, kind FROM question_attachments WHERE id = ?").bind(id).first<{ object_key: string; name: string; content_type: string; owner_id: string; question_id: string; kind: string }>();
   if (!reference) throw new HttpError(404, "등록한 참고자료를 찾을 수 없습니다.");
+  if (reference.owner_id !== user.id) {
+    const assigned = reference.kind === "problem" && await database().prepare("SELECT a.id FROM assignments a JOIN memberships m ON m.academy_id = a.academy_id WHERE m.user_id = ? AND json_extract(a.data, '$.question.id') = ? AND EXISTS (SELECT 1 FROM json_each(a.data, '$.question.references') r WHERE json_extract(r.value, '$.id') = ?) LIMIT 1").bind(user.id, reference.question_id, id).first();
+    if (!assigned) throw new HttpError(404, "등록한 참고자료를 찾을 수 없습니다.");
+  }
   const object = await env.BUCKET?.get(reference.object_key);
   if (!object) throw new HttpError(404, "원본 파일을 찾을 수 없습니다.");
   return new Response(object.body, { headers: { "Content-Type": reference.content_type, "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(reference.name)}`, "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox" } });
@@ -389,7 +409,7 @@ export async function getApprovedReports(request: Request, ids: string[]): Promi
     const item = await fetchSubmission(id);
     if (!await canViewSubmission(item, user.id)) throw new HttpError(403, "이 답안을 볼 권한이 없습니다.");
     if (item.status !== "approved" || !item.final) throw new HttpError(409, "선생님이 확정한 답안만 리포트로 출력할 수 있습니다.");
-    results.push({ ...item, draft: null });
+    results.push({ ...await visibleSubmission(item, user.id), draft: null });
   }
   return results;
 }

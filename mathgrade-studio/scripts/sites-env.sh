@@ -3,6 +3,10 @@ set -euo pipefail
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 runtime_root="${SITES_RUNTIME_ROOT:-${project_root}/.sites-runtime}"
+# Resolve relative overrides against the caller before changing directories.
+mkdir -p "${runtime_root}"
+runtime_root="$(cd "${runtime_root}" && pwd -P)"
+export SITES_RUNTIME_ROOT="${runtime_root}"
 
 mkdir -p \
   "${runtime_root}/home" \

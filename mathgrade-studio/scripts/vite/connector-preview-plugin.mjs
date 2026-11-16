@@ -4,6 +4,13 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import getRawBody from "raw-body";
 
+// A wildcard listener is reached through loopback; IPv6 literals need brackets.
+export function connectorBridgeOrigin(host, port) {
+  const address = host === true || host === false || !host || host === "0.0.0.0" ? "127.0.0.1" : host === "::" ? "::1" : host;
+  const formatted = address.includes(":") && !address.startsWith("[") ? `[${address}]` : address;
+  return `http://${formatted}:${port}`;
+}
+
 const moduleId = "virtual:sites-connector-preview";
 const resolvedId = `\0${moduleId}`;
 const endpoint = "/__sites_connector_preview/invoke";
@@ -81,8 +88,9 @@ export function connectorPreview() {
       }
       // Auxiliary Workers load before Vite starts listening. strictPort keeps
       // this configured address stable when the server opens its socket.
-      const url = `http://127.0.0.1:${server.config.server.port}${endpoint}`;
-      const contextUrl = `http://127.0.0.1:${server.config.server.port}${contextEndpoint}`;
+      const origin = connectorBridgeOrigin(server.config.server.host, server.config.server.port);
+      const url = `${origin}${endpoint}`;
+      const contextUrl = `${origin}${contextEndpoint}`;
       return `export default { async getContext() {
         try {
           const response = await fetch(${JSON.stringify(contextUrl)}, {

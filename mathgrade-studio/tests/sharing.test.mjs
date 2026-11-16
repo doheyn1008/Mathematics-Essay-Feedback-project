@@ -3,12 +3,13 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import ts from 'typescript';
 
+const appDir = fileURLToPath(new URL('..', import.meta.url));
 const scratch = await mkdtemp(join(tmpdir(), 'mathgrade-sharing-'));
 const sqlite = new DatabaseSync(':memory:');
-for (const name of (await readdir('drizzle')).filter(name => name.endsWith('.sql')).sort()) sqlite.exec(await readFile(join('drizzle', name), 'utf8'));
+for (const name of (await readdir(join(appDir, 'drizzle'))).filter(name => name.endsWith('.sql')).sort()) sqlite.exec(await readFile(join(appDir, 'drizzle', name), 'utf8'));
 function statement(sql, values = []) {
   return {
     bind(...args) { return statement(sql, args); },
@@ -33,7 +34,7 @@ const db = {
   },
 };
 for (const name of ['validation', 'sharing']) {
-  const input = (await readFile(`lib/server/${name}.ts`, 'utf8')).replace('from "./validation"', 'from "./validation.mjs"');
+  const input = (await readFile(join(appDir, 'lib', 'server', `${name}.ts`), 'utf8')).replace('from "./validation"', 'from "./validation.mjs"');
   await writeFile(join(scratch, `${name}.mjs`), ts.transpileModule(input, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText);
 }
 const { getSharingState, publishSharedQuestion, withdrawSharedQuestion, importSharedQuestion } = await import(pathToFileURL(join(scratch, 'sharing.mjs')));
@@ -46,7 +47,7 @@ function createQuestion(id, ownerId, prompt = '정수 x에 대해 x + 1 = 3을 �
   sqlite.prepare('INSERT INTO questions (id, owner_id, data, revision, created_at) VALUES (?, ?, ?, ?, ?)').run(id, ownerId, JSON.stringify(question), 1, now);
   return question;
 }
-const publish = questionId => ({ questionId, contributorName: '공개 별명', rightsBasis: 'own', rightsNote: '', rightsConfirmed: true, shareConfirmed: true });
+const publish = questionId => ({ questionId, revision: 1, contributorName: '공개 별명', rightsBasis: 'own', rightsNote: '', rightsConfirmed: true, shareConfirmed: true });
 try {
   for (const user of [teacher, other]) sqlite.prepare('INSERT INTO academies (id, owner_id, name, join_code, created_at) VALUES (?, ?, ?, ?, ?)').run(`a-${user.id}`, user.id, '학원', `code-${user.id}`, now);
   createQuestion('q1', teacher.id);
@@ -55,6 +56,7 @@ try {
   await assert.rejects(() => publishSharedQuestion(db, other, publish('q1')), error => error.status === 403);
   await assert.rejects(() => publishSharedQuestion(db, teacher, { ...publish('q1'), shareConfirmed: false }), error => error.status === 400);
   await assert.rejects(() => publishSharedQuestion(db, teacher, { ...publish('q1'), rightsBasis: 'permission' }), error => error.status === 400);
+  await assert.rejects(() => publishSharedQuestion(db, teacher, { ...publish('q1'), revision: 0 }), error => error.code === 'REVISION_CONFLICT');
   const parallel = await Promise.all([publishSharedQuestion(db, teacher, publish('q1')), publishSharedQuestion(db, teacher, publish('q1'))]);
   assert.equal(parallel[0].sharedQuestion.id, parallel[1].sharedQuestion.id);
   assert.equal(parallel.reduce((total, item) => total + item.pointsAwarded, 0), 10, 'concurrent retry awards once');
@@ -90,6 +92,21 @@ try {
   const third = { id: 't3', name: '다른 선생님' };
   sqlite.prepare('INSERT INTO academies (id, owner_id, name, join_code, created_at) VALUES (?, ?, ?, ?, ?)').run('a3', third.id, '학원3', 'code3', now);
   await assert.rejects(() => importSharedQuestion(db, third, shared.id), error => error.status === 404);
+  createQuestion('case-a', teacher.id, 'f(x)=x, F(x)=x²일 때 f(2)를 구하시오.');
+  createQuestion('case-b', teacher.id, 'f(x)=x, F(x)=x²일 때 F(2)를 구하시오.');
+  await publishSharedQuestion(db, teacher, publish('case-a'));
+  await publishSharedQuestion(db, teacher, publish('case-b'));
+  createQuestion('compat-a', teacher.id, 'x² = 4를 풀어라.');
+  createQuestion('compat-b', teacher.id, 'x2 = 4를 풀어라.');
+  await publishSharedQuestion(db, teacher, publish('compat-a'));
+  await publishSharedQuestion(db, teacher, publish('compat-b'));
+  createQuestion('changed-during-publish', teacher.id, '새 문제 777');
+  const racingDb = { ...db, async batch(writes) {
+    sqlite.prepare('UPDATE questions SET revision = 2 WHERE id = ?').run('changed-during-publish');
+    return db.batch(writes);
+  }};
+  await assert.rejects(() => publishSharedQuestion(racingDb, teacher, publish('changed-during-publish')), error => error.code === 'REVISION_CONFLICT');
+  assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM shared_questions WHERE source_question_id = ?').get('changed-during-publish').count, 0);
   createQuestion('rollback', teacher.id, '서로 다른 두 주사위에서 눈의 합이 3일 확률을 구하시오.');
   sqlite.exec("CREATE TRIGGER fail_point_award BEFORE INSERT ON point_events BEGIN SELECT RAISE(ABORT, 'simulated ledger failure'); END;");
   await assert.rejects(() => publishSharedQuestion(db, teacher, publish('rollback')));

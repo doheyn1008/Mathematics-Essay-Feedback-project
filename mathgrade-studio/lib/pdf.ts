@@ -1,6 +1,7 @@
 import { PDFDocument, PDFFont, PDFPage, rgb } from "pdf-lib";
 import fontkit from "@pdf-lib/fontkit";
 import type { Submission } from "./types";
+import { drawVisiblePdfPage } from "./pdf-page";
 
 export type PdfOptions = {
   fontBytes?: Uint8Array;
@@ -180,13 +181,8 @@ export async function generateFeedbackPdf(submissions: Submission[], options: Pd
       if (source.getPageCount() > 100) throw new Error("첨부 PDF는 100쪽 이내로 나누어 내보내 주세요.");
       for (let index = 0; index < source.getPageCount(); index++) {
         addPage(`${student} · 제출 답안 ${index + 1}쪽`);
-        const [embedded] = await document.embedPdf(source, [index]);
-        const height = y - PAGE.bottom;
-        const scale = Math.min(width / embedded.width, height / embedded.height);
-        page.drawPage(embedded, {
-          x: PAGE.margin + (width - embedded.width * scale) / 2,
-          y: y - embedded.height * scale,
-          width: embedded.width * scale, height: embedded.height * scale,
+        await drawVisiblePdfPage(document, source.getPage(index), page, {
+          x: PAGE.margin, y: PAGE.bottom, width, height: y - PAGE.bottom,
         });
       }
     } else {

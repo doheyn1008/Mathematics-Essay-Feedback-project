@@ -22,6 +22,20 @@
       "when": 1794762203046,
       "tag": "0002_noisy_mephisto",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1794763670348,
+      "tag": "0003_graceful_terrax",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1794763686639,
+      "tag": "0004_naive_korath",
+      "breakpoints": true
     }
   ]
 }

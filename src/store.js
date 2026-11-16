@@ -1,5 +1,8 @@
+import { problems } from './data.js';
+
 export const STORAGE_KEY = 'puleegyeol.demo.v1';
 const VERSION = 1;
+const knownProblemIds = new Set(problems.map((problem) => problem.id));
 
 export function createInitialState() {
   return { version: VERSION, account: null, submissions: [], activePlan: null };
@@ -42,6 +45,7 @@ function normalizeReport(value) {
 function normalizeSubmission(value) {
   if (!value || typeof value !== 'object' || !text(value.id, 100) || !text(value.problemId, 100)) return null;
   const problemId = text(value.problemId, 100);
+  if (!knownProblemIds.has(problemId)) return null;
   const candidateReport = normalizeReport(value.report);
   const report = candidateReport?.problemId === problemId ? candidateReport : null;
   const createdAt = dateTime(value.createdAt);
@@ -106,12 +110,12 @@ export function updateSubmission(state, id, patch = {}) {
     ...normalized,
     submissions: normalized.submissions.map((item) => item.id === id ? normalizeSubmission({
       ...item,
-      problemId: patch.problemId === undefined ? item.problemId : text(patch.problemId, 100) || item.problemId,
+      problemId: knownProblemIds.has(text(patch.problemId, 100)) ? patch.problemId : item.problemId,
       answer: patch.answer === undefined ? item.answer : patch.answer,
       fileName: patch.fileName === undefined ? item.fileName : patch.fileName,
       report: patch.report === undefined ? item.report : patch.report,
       status: patch.status === undefined ? item.status : patch.status,
       updatedAt: new Date().toISOString(),
-    }) : item),
+    }) : item).filter(Boolean),
   };
 }

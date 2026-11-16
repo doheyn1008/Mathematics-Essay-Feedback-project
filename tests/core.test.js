@@ -136,3 +136,13 @@ test('reset removes only the demo storage key', () => {
   assert.equal(storage.getItem(STORAGE_KEY), null);
   assert.equal(storage.getItem('unrelated'), 'keep');
 });
+
+
+test('unknown restored problem IDs are discarded before the submission form opens', () => {
+  const valid = createSubmission({ problemId: 'cubic', answer: 'known problem' });
+  const unknown = { ...valid, id: 'unknown', problemId: 'missing' };
+  const restored = loadState(memoryStorage(JSON.stringify({ ...createInitialState(), submissions: [unknown, valid] })));
+  assert.deepEqual(restored.submissions.map(item => item.problemId), ['cubic']);
+  assert.equal(createSubmission({ problemId: 'missing' }), null);
+  assert.equal(updateSubmission({ ...createInitialState(), submissions: [valid] }, valid.id, { problemId: 'missing' }).submissions[0].problemId, 'cubic');
+});

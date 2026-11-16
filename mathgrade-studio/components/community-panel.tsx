@@ -6,6 +6,7 @@ import type { PointEvent, Question, SharedQuestion } from "@/lib/types";
 
 export type PublishInput = {
   questionId: string;
+  revision: number;
   contributorName: string;
   rightsBasis: "own" | "permission";
   rightsNote: string;
@@ -63,7 +64,7 @@ export function CommunityPanel({ questions, sharedQuestions, points, userId, bus
       const rightsNote = String(form.get("rightsNote") ?? "").trim();
       if (!contributorName) throw new Error("다른 선생님께 표시할 이름을 입력해 주세요.");
       if (rightsBasis === "permission" && !rightsNote) throw new Error("공개와 수업 이용을 허락받은 범위를 입력해 주세요.");
-      await onPublish({ questionId: selected.id, contributorName, rightsBasis, rightsNote, rightsConfirmed: true, shareConfirmed: true });
+      await onPublish({ questionId: selected.id, revision: selected.revision, contributorName, rightsBasis, rightsNote, rightsConfirmed: true, shareConfirmed: true });
       element.reset(); setRightsBasis("own"); setTab("browse");
     });
   }
@@ -112,7 +113,7 @@ export function CommunityPanel({ questions, sharedQuestions, points, userId, bus
         {selected && <section className="question-box" aria-label="공개 내용 미리보기"><strong>공개 내용 미리보기</strong><h3 style={{ marginBottom: 8 }}>{selected.title}</h3><p>{selected.prompt}</p><div className="stack" style={{ marginTop: 12 }}>{selected.criteria.map((criterion) => <div key={criterion.id}><strong>{criterion.title} · {criterion.max}점</strong><p>{criterion.description}</p></div>)}</div><p style={{ marginTop: 12 }}>출처: {selected.sourceLabel}</p>{selected.sourceUrl && <a className="source-link" href={selected.sourceUrl} target="_blank" rel="noreferrer">{selected.sourceUrl}<ExternalLink /></a>}{selected.university && <p>{selected.university}{selected.academicYear ? ` · ${selected.academicYear}학년도` : ""}</p>}</section>}
         <p className="muted">문제 전체를 읽을 수 있게 본문을 등록해 주세요. 비공개 메모, 원본 첨부파일, 학생 답안과 추가 질문은 공유되지 않습니다.</p>
         <div className="form-grid"><label className="field">공개 표시 이름<input className="text-input" name="contributorName" placeholder="예: 이룸수학 연구실" required maxLength={80} disabled={disabled} /></label><label className="field">공개할 수 있는 근거<select className="text-input" value={rightsBasis} onChange={(event) => setRightsBasis(event.target.value as "own" | "permission")} disabled={disabled}><option value="own">내가 직접 제작한 문항</option><option value="permission">권리자의 이용 허락을 받은 문항</option></select></label></div>
-        <label className="field">{rightsBasis === "permission" ? "허락받은 이용 범위 (필수)" : "공개 이용 안내 (선택)"}<textarea className="text-input" name="rightsNote" rows={3} maxLength={3000} required={rightsBasis === "permission"} disabled={disabled} placeholder={rightsBasis === "permission" ? "권리자, 허락받은 공개·수업 이용 범위와 확인 가능한 근거를 적어 주세요. 이 내용도 공개됩니다." : "다른 선생님에게 알려줄 출제 의도나 이용 범위를 적어 주세요. 이 내용도 공개됩니다."} /></label>
+        <label className="field">{rightsBasis === "permission" ? "허락받은 이용 범위 (필수)" : "공개 이용 안내 (선택)"}<textarea className="text-input" name="rightsNote" rows={3} maxLength={2000} required={rightsBasis === "permission"} disabled={disabled} placeholder={rightsBasis === "permission" ? "권리자, 허락받은 공개·수업 이용 범위와 확인 가능한 근거를 적어 주세요. 이 내용도 공개됩니다." : "다른 선생님에게 알려줄 출제 의도나 이용 범위를 적어 주세요. 이 내용도 공개됩니다."} /></label>
         <div className="state-callout"><ShieldCheck size={16} style={{ display: "inline", verticalAlign: "middle", marginRight: 6 }} />출처 표시와 공개할 권한을 함께 확인하세요. 기출문항을 보유하거나 학생에게 제출받았다는 이유만으로 공개할 수 있는 것은 아닙니다.</div>
         <label style={{ display: "flex", alignItems: "flex-start", gap: 9, fontSize: 12, lineHeight: 1.7, color: "#665472" }}><input type="checkbox" name="rightsConfirmed" required disabled={disabled} style={{ marginTop: 4, flexShrink: 0 }} /><span>문제와 채점기준을 공개하고 다른 선생님이 가져가 수업에 이용하도록 허락할 권한이 있습니다.</span></label>
         <label style={{ display: "flex", alignItems: "flex-start", gap: 9, fontSize: 12, lineHeight: 1.7, color: "#665472" }}><input type="checkbox" name="shareConfirmed" required disabled={disabled} style={{ marginTop: 4, flexShrink: 0 }} /><span>위 미리보기와 표시 이름·이용 안내를 다른 선생님에게 공개하는 데 동의합니다. 학생 개인정보는 포함하지 않았습니다.</span></label>

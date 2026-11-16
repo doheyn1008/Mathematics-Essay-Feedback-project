@@ -1,6 +1,6 @@
 "use client";
 
-import type { FormEvent } from "react";
+import { useState, type FormEvent } from "react";
 import { ExternalLink, GraduationCap, TrendingUp } from "lucide-react";
 import type { AdmissionRecord, Submission } from "@/lib/types";
 import { comparePastCutoffs, forecastCutoff } from "@/lib/admissions";
@@ -116,22 +116,34 @@ export function AdmissionForm({ record, busy, onSave }: {
   busy: boolean;
   onSave: (payload: AdmissionInput) => Promise<void>;
 }) {
+  const [error, setError] = useState("");
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setError("");
     const form = new FormData(event.currentTarget);
-    await onSave({
-      ...(record ? { id: record.id, revision: record.revision ?? 1 } : {}),
-      university: String(form.get("university") ?? "").trim(),
-      department: String(form.get("department") ?? "").trim(),
-      academicYear: Number(form.get("academicYear")),
-      examKey: String(form.get("examKey") ?? "").trim(),
-      scale: Number(form.get("scale")),
-      score: Number(form.get("score")),
-      metric: form.get("metric") as AdmissionRecord["metric"],
-      pointType: form.get("pointType") as AdmissionRecord["pointType"],
-      sourceUrl: String(form.get("sourceUrl") ?? "").trim(),
-      sourceLabel: String(form.get("sourceLabel") ?? "").trim(),
-    });
+    const score = Number(form.get("score"));
+    const scale = Number(form.get("scale"));
+    if (!Number.isFinite(score) || !Number.isFinite(scale) || score < 0 || scale <= 0 || score > scale) {
+      setError("점수는 0점 이상, 입력한 만점 이하여야 합니다.");
+      return;
+    }
+    try {
+      await onSave({
+        ...(record ? { id: record.id, revision: record.revision ?? 1 } : {}),
+        university: String(form.get("university") ?? "").trim(),
+        department: String(form.get("department") ?? "").trim(),
+        academicYear: Number(form.get("academicYear")),
+        examKey: String(form.get("examKey") ?? "").trim(),
+        scale,
+        score,
+        metric: form.get("metric") as AdmissionRecord["metric"],
+        pointType: form.get("pointType") as AdmissionRecord["pointType"],
+        sourceUrl: String(form.get("sourceUrl") ?? "").trim(),
+        sourceLabel: String(form.get("sourceLabel") ?? "").trim(),
+      });
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : "입시 자료를 저장하지 못했습니다.");
+    }
   }
 
   return <form onSubmit={submit} className="stack">
@@ -142,11 +154,12 @@ export function AdmissionForm({ record, busy, onSave }: {
       <label className="field">시험 비교 기준<input name="examKey" required maxLength={150} defaultValue={record?.examKey} placeholder="동일 문항군·환산 기준 식별자" /><small>문항에 입력한 시험 기준과 같아야 비교됩니다. 출제·환산 기준이 달라지면 별도 기준으로 등록하세요.</small></label>
       <label className="field">점수 종류<select name="pointType" defaultValue={record?.pointType ?? "essay"}><option value="essay">논술 점수</option><option value="total">전형 총점</option><option value="school">학생부 성적</option></select></label>
       <label className="field">성적 지표<select name="metric" defaultValue={record?.metric ?? "minimum"}><option value="minimum">최저점</option><option value="average">평균점</option><option value="percentile70">70% 지점 성적</option></select></label>
-      <label className="field">점수<input name="score" type="number" min={0} max={10000} step="any" required defaultValue={record?.score} /></label>
+      <label className="field">점수<input name="score" type="number" min={0} max={10000} step="any" required defaultValue={record?.score} aria-invalid={Boolean(error)} aria-describedby={error ? "admission-score-error" : undefined} /></label>
       <label className="field">만점<input name="scale" type="number" min={1} max={10000} step="any" required defaultValue={record?.scale ?? 100} /></label>
       <label className="field wide">자료 출처 이름<input name="sourceLabel" required maxLength={500} defaultValue={record?.sourceLabel} placeholder="자료 제목 · 발표 기관" /></label>
       <label className="field wide">원문 출처 URL<input name="sourceUrl" type="url" required maxLength={2000} defaultValue={record?.sourceUrl} placeholder="https://" /></label>
     </div>
+    {error && <p id="admission-score-error" className="form-error" role="alert">{error}</p>}
     <p className="muted">추천과 예측에는 논술 최저점만 사용합니다. 같은 시험과 환산 기준의 전체 논술 점수를 입력하고, 출처에서 확인되지 않은 합격선은 등록하지 마세요.</p>
     <button className="button primary" type="submit" disabled={busy}>{busy ? "저장 중…" : record ? "자료 수정 저장" : "입시 자료 등록"}</button>
   </form>;

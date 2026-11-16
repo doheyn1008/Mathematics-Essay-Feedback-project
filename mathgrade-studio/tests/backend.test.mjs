@@ -3,14 +3,15 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import ts from 'typescript';
 
 // Exercise the actual handler against SQLite with D1 transaction behavior.
+const appDir = fileURLToPath(new URL('..', import.meta.url));
 const scratch = await mkdtemp(join(tmpdir(), 'mathgrade-api-'));
 const sqlite = new DatabaseSync(':memory:');
-for (const name of (await readdir('drizzle')).filter((name) => name.endsWith('.sql')).sort()) {
-  sqlite.exec(await readFile(join('drizzle', name), 'utf8'));
+for (const name of (await readdir(join(appDir, 'drizzle'))).filter((name) => name.endsWith('.sql')).sort()) {
+  sqlite.exec(await readFile(join(appDir, 'drizzle', name), 'utf8'));
 }
 function statement(sql, values = []) {
   return {
@@ -47,7 +48,7 @@ const fakeEnv = {
 };
 globalThis.__mathgradeTestEnv = fakeEnv;
 for (const name of ['validation', 'sharing', 'service']) {
-  let input = await readFile(`lib/server/${name}.ts`, 'utf8');
+  let input = await readFile(join(appDir, 'lib', 'server', `${name}.ts`), 'utf8');
   input = input.replace('import { env } from "cloudflare:workers";', 'const env = globalThis.__mathgradeTestEnv;');
   input = input.replace('from "./validation"', 'from "./validation.mjs"').replace('from "./sharing"', 'from "./sharing.mjs"');
   const compiled = ts.transpileModule(input, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
@@ -139,6 +140,8 @@ try {
   assert.equal(directResult.status, 201);
   const directSubmission = directResult.result.submission;
   assert.equal(directSubmission.rubricPending, true);
+  assert.equal(directSubmission.question.references[0].id, directSubmission.problemAttachment.id);
+  assert.equal((await call(`references/${directSubmission.problemAttachment.id}`, 'student')).status, 200, 'file-only source remains usable in saved question');
   assert.deepEqual(directSubmission.question.criteria, []);
   assert.equal(directSubmission.studentQuestion, directBody.studentQuestion);
   assert.equal(directSubmission.question.ownerId, 'student');
@@ -179,8 +182,14 @@ try {
   const beforeBad = files.size;
   assert.equal((await call('submissions', 'student', invalidProblem)).status, 400);
   assert.equal(files.size, beforeBad, 'both originals validated before any file write');
+  for (const mime of ['constructor', '__proto__']) {
+    invalidProblem.set('problemFile', new File(['not a document'], 'bad.bin', { type: mime }));
+    assert.equal((await call('submissions', 'student', invalidProblem)).status, 400, `inherited MIME ${mime} rejected`);
+    assert.equal(files.size, beforeBad);
+  }
+
   // Imported provenance survives private editing and cannot be stripped for a new award.
-  const published = (await call('shared-questions', 'teacher', { questionId: question.id, contributorName: '선생님', rightsBasis: 'own', rightsNote: '', rightsConfirmed: true, shareConfirmed: true })).result.sharedQuestion;
+  const published = (await call('shared-questions', 'teacher', { questionId: question.id, revision: 2, contributorName: '선생님', rightsBasis: 'own', rightsNote: '', rightsConfirmed: true, shareConfirmed: true })).result.sharedQuestion;
   const teacher2 = (await call('academies', 'other-teacher', { name: '두 번째 학원' })).result.academy;
   assert.ok(teacher2.id);
   const imported = (await call(`shared-questions/${published.id}/import`, 'other-teacher', {})).result.question;

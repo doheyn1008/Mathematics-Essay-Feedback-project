@@ -1,0 +1,22 @@
+// Product account, class and exam contracts. Legacy records remain readable.
+export type AccountType = "teacher" | "academy_student" | "personal";
+export type Plan = "teacher" | "personal_basic" | "personal_premium";
+export type Profile = { userId: string; accountType: AccountType; displayName: string; createdAt: string };
+export type Entitlement = { userId: string; plan: Plan; status: "active" | "inactive"; expiresAt: string | null; analysisLimit: number | null; used: number };
+export type ReleaseMode = "teacher_review" | "ai_immediate";
+export type ClassRoom = { id: string; name: string; createdBy: string; billingTeacherId: string; releaseMode: ReleaseMode; studentCode?: string; teacherCode?: string; createdAt: string };
+export type ClassMember = { classId: string; userId: string; role: "teacher" | "student"; displayName: string; joinedAt: string };
+export type ExamFileRole = "problem" | "answer" | "mixed" | "solution" | "rubric";
+export type ExamFile = { id: string; name: string; type: string; size: number; url: string; role: ExamFileRole; order: number; itemId?: string };
+export type ExamItem = { id: string; label: string; parentId?: string; maxScore: number; criteria: string };
+export type Exam = { id: string; ownerId: string; classId: string | null; title: string; sourceLabel: string; sourceUrl: string; items: ExamItem[]; files: ExamFile[]; releaseMode: ReleaseMode; revision: number; createdAt: string; originContributionId?: string; legacyId?: string; legacyPrompt?: string };
+export type ExamAssignment = { id: string; classId: string; exam: Exam; title: string; dueAt: string | null; createdAt: string };
+export type ItemFeedback = { itemId: string; label: string; score: number; maxScore: number; evidence: string; feedback: string; solution: string; uncertainty: string };
+export type ExamResult = { items: ItemFeedback[]; total: number; maximum: number; summary: string; questionResponse: string; basis: "general" | "provided"; uncertainties: string[] };
+export type FeedbackVersion = { id: string; submissionId: string; version: number; authorId: string; authorName: string; authorType: "ai" | "teacher"; createdAt: string; result: ExamResult; teacherReviewed: boolean; published: boolean };
+export type ExamSubmission = { id: string; studentId: string; studentName: string; submittedBy: string; classId: string | null; assignmentId: string | null; billingUserId: string; exam: Exam; files: ExamFile[]; question: string; processing: "not_configured" | "ready" | "processing" | "completed" | "failed"; visibility: "private" | "visible"; reviewStatus: "unreviewed" | "reviewed"; releaseMode: ReleaseMode; latestVersion: FeedbackVersion | null; revision: number; createdAt: string; updatedAt: string; legacyId?: string; legacyAnswer?: string };
+export type ExamMessage = { id: string; submissionId: string; authorId: string; authorName: string; authorRole: "teacher" | "student"; itemId: string | null; text: string; createdAt: string };
+export type Contribution = { id: string; sourceExamId: string; sourceRevision: number; contributorId: string; contributorName: string; exam: Exam; rightsBasis: "own" | "permission"; rightsNote: string; consentVersion: string; consentScope: string; consentAt: string; status: "published" | "withdrawn"; rewardStatus: "policy_pending" | "awarded"; createdAt: string };
+export type ContributionPoint = { id: string; contributionId: string; amount: number; policyVersion: string; createdAt: string };
+export type ProductState = { user: { id: string; name: string; email: string } | null; profile: Profile | null; entitlement: Entitlement | null; classes: ClassRoom[]; members: ClassMember[]; exams: Exam[]; assignments: ExamAssignment[]; submissions: ExamSubmission[]; contributions: Contribution[]; points: ContributionPoint[]; capabilities: { storageReady: boolean; aiConfigured: boolean; billingConfigured: boolean }; policy: { pricesConfigured: boolean; contributionPoints: number | null; contributionPolicyVersion: string | null } };
+export type SubmissionDetail = { submission: ExamSubmission; versions: FeedbackVersion[]; messages: ExamMessage[] };

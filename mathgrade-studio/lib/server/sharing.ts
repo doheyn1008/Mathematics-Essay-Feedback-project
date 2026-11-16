@@ -27,8 +27,8 @@ export async function getSharingState(db: D1Database, user: User): Promise<{ sha
 }
 
 async function contentHash(prompt: string): Promise<string> {
-  // Treat whitespace/case/compatibility-character-only changes as the same contribution.
-  const normalized = prompt.normalize("NFKC").replace(/\s+/gu, "").toLowerCase();
+  // Whitespace does not identify a new problem; case and mathematical glyphs do.
+  const normalized = prompt.normalize("NFC").replace(/\s+/gu, "");
   const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(normalized));
   return Array.from(new Uint8Array(bytes), value => value.toString(16).padStart(2, "0")).join("");
 }
@@ -38,7 +38,7 @@ export async function publishSharedQuestion(db: D1Database, user: User, body: Re
   if (body.rightsConfirmed !== true || body.shareConfirmed !== true) throw new HttpError(400, "공개 이용 권한과 공유 범위를 각각 확인해 주세요.");
   if (body.rightsBasis !== "own" && body.rightsBasis !== "permission") throw new HttpError(400, "본인 창작 또는 게시 허락 여부를 선택하세요.");
   const questionId = requireText(body.questionId, "문항 ID", 100);
-  const row = await db.prepare("SELECT data FROM questions WHERE id = ? AND owner_id = ?").bind(questionId, user.id).first<DataRow>();
+  const row = await db.prepare("SELECT data, revision FROM questions WHERE id = ? AND owner_id = ?").bind(questionId, user.id).first<DataRow & { revision: number }>();
   if (!row) throw new HttpError(403, "본인이 등록한 문항만 공유할 수 있습니다.");
   const question = decode<Question>(row);
   if (question.originSharedId) throw new HttpError(409, "가져온 공유 문항은 다시 기여 등록할 수 없습니다.", "IMPORTED_QUESTION");
@@ -51,6 +51,7 @@ export async function publishSharedQuestion(db: D1Database, user: User, body: Re
   const url = sourceUrl(question.sourceUrl);
   const existing = await db.prepare("SELECT data FROM shared_questions WHERE source_question_id = ?").bind(questionId).first<DataRow>();
   if (existing) return { sharedQuestion: decode<SharedQuestion>(existing), pointsAwarded: 0 };
+  if (body.revision !== row.revision) throw new HttpError(409, "미리 본 문항이 변경되었습니다. 최신 내용을 다시 확인해 주세요.", "REVISION_CONFLICT");
   const hash = await contentHash(prompt);
   const now = new Date().toISOString();
   const sharedQuestion: SharedQuestion = {
@@ -60,10 +61,11 @@ export async function publishSharedQuestion(db: D1Database, user: User, body: Re
     createdAt: now, status: "published",
   };
   try {
-    await db.batch([
-      db.prepare("INSERT INTO shared_questions (id, source_question_id, contributor_id, content_hash, data, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(sharedQuestion.id, questionId, user.id, hash, JSON.stringify(sharedQuestion), "published", now),
-      db.prepare("INSERT INTO point_events (id, user_id, shared_question_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), user.id, sharedQuestion.id, contributionPoints, "공개 문항 기여", now),
+    const writes = await db.batch([
+      db.prepare("INSERT INTO shared_questions (id, source_question_id, contributor_id, content_hash, data, status, created_at) SELECT ?, ?, ?, ?, ?, ?, ? FROM questions WHERE id = ? AND owner_id = ? AND revision = ?").bind(sharedQuestion.id, questionId, user.id, hash, JSON.stringify(sharedQuestion), "published", now, questionId, user.id, row.revision),
+      db.prepare("INSERT INTO point_events (id, user_id, shared_question_id, amount, reason, created_at) SELECT ?, ?, ?, ?, ?, ? FROM shared_questions WHERE id = ?").bind(crypto.randomUUID(), user.id, sharedQuestion.id, contributionPoints, "공개 문항 기여", now, sharedQuestion.id),
     ]);
+    if (!writes[0].meta.changes) throw new HttpError(409, "미리 본 문항이 변경되었습니다. 최신 내용을 다시 확인해 주세요.", "REVISION_CONFLICT");
   } catch (error) {
     const prior = await db.prepare("SELECT data FROM shared_questions WHERE source_question_id = ? OR content_hash = ?").bind(questionId, hash).first<DataRow>();
     if (!prior) throw error;

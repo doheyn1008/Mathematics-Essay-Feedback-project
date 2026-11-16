@@ -28,7 +28,9 @@ const samples = [
 function restore() {
   try {
     const saved = JSON.parse(localStorage.getItem(key));
-    if (Array.isArray(saved?.items) && saved.rubric?.criteria?.length) return saved;
+    const validRubric = (rubric) => rubric && typeof rubric === "object" && Array.isArray(rubric.criteria) && rubric.criteria.length > 0 && rubric.criteria.every((criterion) => criterion && typeof criterion === "object" && Number.isFinite(criterion.max) && criterion.max > 0);
+    const validItem = (item) => item && typeof item === "object" && !Array.isArray(item) && typeof item.id === "string" && validRubric(item.rubric) && Array.isArray(item.scores) && item.scores.every((score) => score === null || Number.isFinite(score)) && Array.isArray(item.evidence) && item.evidence.every((evidence) => typeof evidence === "string");
+    if (Array.isArray(saved?.items) && saved.items.every(validItem) && validRubric(saved.rubric)) return saved;
   } catch {}
   return { rubric: sampleRubric, items: samples };
 }
@@ -106,7 +108,7 @@ function render() {
     return;
   }
 
-  $("#paperContent").innerHTML = `<div class="panel"><div class="question"><strong>${escapeHtml(item.rubric.title)}</strong><p>${escapeHtml(item.rubric.prompt)}</p></div><div class="paper-label">답안 원문</div>${item.answer ? `<p class="answerbody">${escapeHtml(item.answer)}</p>` : ""}<div id="filePreview"></div></div>`;
+  $("#paperContent").innerHTML = `<div class="panel"><div class="question"><strong>${escapeHtml(item.rubric.title)}</strong><p>${escapeHtml(item.rubric.prompt)}</p></div>${item.rubric.notes ? `<div class="question"><strong>등록 당시 채점 유의사항</strong><p>${escapeHtml(item.rubric.notes)}</p></div>` : ""}<div class="paper-label">답안 원문</div>${item.answer ? `<p class="answerbody">${escapeHtml(item.answer)}</p>` : ""}<div id="filePreview"></div></div>`;
   if (item.file) {
     const attachment = attachments.get(item.id);
     const preview = $("#filePreview");

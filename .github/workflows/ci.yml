@@ -29,3 +29,26 @@ jobs:
         run: npm test
       - name: Build static website
         run: npm run build
+
+  mathgrade-studio:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mathgrade-studio
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: mathgrade-studio/package-lock.json
+      - name: Install application dependencies
+        run: npm ci
+      - name: Run application regression tests
+        run: npm test
+      - name: Check TypeScript
+        run: npx tsc --noEmit
+      - name: Build application
+        run: npm run build
