@@ -928,11 +928,15 @@ test('only the configured owner can switch all account modes without buying or o
 
 test('owner mode changes preserve classes and student submissions, and analysis records usage without charging a paid grant', async t => {
   const f=fixture(t); const {room,work}=await f.base('ai_immediate');
-  const owner={cookie:await f.sessionCookie('teacher')},student={cookie:await f.sessionCookie('student')};
+  await f.register('co-teacher','teacher',true);
+  await f.ok('classes/join','co-teacher',{code:room.teacherCode});
+  const owner={cookie:await f.sessionCookie('teacher')},student={cookie:await f.sessionCookie('student')},co={cookie:await f.sessionCookie('co-teacher')};
   f.sqlite.prepare('DELETE FROM product_entitlements WHERE user_id=?').run('teacher');
   runtime.DEPLOYMENT_TARGET='cloudflare'; runtime.ADMIN_SITE_ORIGIN='https://example.test'; runtime.ADMIN_OWNER_USER_ID='teacher';
   assert.equal((await f.call('account/mode',null,{mode:'personal_premium'},owner)).status,200);
   assert.equal((await f.call('state',null,undefined,owner)).value.classes.length,0);
+  const settings=await f.call(`classes/${room.id}/settings`,null,{name:'공동 관리 반',billingTeacherId:'teacher'},co);
+  assert.equal(settings.status,200,JSON.stringify(settings.value));
   const sent=await f.call('submissions',null,f.form({assignmentId:work.id,clientRequestId:'owner-funded',question:''},[{role:'answer'}]),student);
   assert.equal(sent.status,201,JSON.stringify(sent.value));
   const completed=await ingestAnalysisResult(f.db,sent.value.submission.id,1,result());

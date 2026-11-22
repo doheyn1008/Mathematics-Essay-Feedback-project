@@ -107,6 +107,13 @@ export async function requireClassTeacher(db: D1Database, classId: string, userI
   if (paid) await requireEntitlement(db, userId, ["teacher"]);
   return member;
 }
+/** Validate the payer independently of the owner's currently selected workspace. */
+export async function requireBillingTeacher(db: D1Database, classId: string, userId: string): Promise<ClassMember> {
+  if (!await ownerAccess(db,userId)) return requireClassTeacher(db,classId,userId,true);
+  const member = await classMembership(db,classId,userId);
+  if (member?.role !== "teacher") throw new HttpError(403,"이 반의 담당 선생님만 비용을 부담할 수 있습니다.","CLASS_TEACHER_REQUIRED");
+  return member;
+}
 export async function getExam(db: D1Database, id: string): Promise<Exam> {
   const row = await db.prepare("SELECT data, revision FROM product_exams WHERE id = ?").bind(id).first<{data: string; revision: number}>();
   if (!row) throw new HttpError(404, "시험을 찾을 수 없습니다.");

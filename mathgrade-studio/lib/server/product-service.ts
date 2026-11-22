@@ -8,6 +8,7 @@ import { HttpError, finiteNumber, optionalText, requireText, sourceUrl } from ".
 import { checkProductOrigin, classMembership, getEntitlement, getExam, getProfile, ownerAccess, productDatabase, productIdentity, productJson, readProductJson, requireClassTeacher, requireEntitlement, requireProductUser, requireProfile, type ProductUser } from "./product-auth";
 import { prepareAnalysisInput, validateExamResult } from "./product-analysis";
 import { contributionPolicy, getProductContributions } from "./product-contributions";
+import { requireBillingTeacher } from "./product-auth";
 
 type DataRow = { data: string; revision?: number };
 const decode = <T>(row: DataRow): T => JSON.parse(row.data) as T;
@@ -164,7 +165,7 @@ async function settingsClass(id: string, body: Record<string, unknown>, user: Pr
   const payer = requireText(body.billingTeacherId, "이용권 담당 선생님", 100);
   // Only the selected payer may accept billing responsibility, never another teacher's credits.
   if (payer !== classroom.billingTeacherId && payer !== user.id) throw new HttpError(403, "이용권 담당 변경은 비용을 부담할 선생님 본인이 수락해야 합니다.", "BILLING_CONSENT_REQUIRED");
-  await requireClassTeacher(db, id, payer, true);
+  await requireBillingTeacher(db, id, payer);
   const updated = { ...classroom, name: body.name === undefined ? classroom.name : requireText(body.name,"반 이름",100), billingTeacherId: payer, releaseMode: releaseMode(body.releaseMode, classroom.releaseMode) };
   const updates=[db.prepare("UPDATE product_classes SET data = ? WHERE id = ? AND data=? AND EXISTS (SELECT 1 FROM product_members WHERE class_id=? AND user_id=? AND role='teacher') AND EXISTS (SELECT 1 FROM product_members WHERE class_id=? AND user_id=? AND role='teacher')").bind(JSON.stringify(updated),id,JSON.stringify(classroom),id,user.id,id,payer)];
   if (payer!==classroom.billingTeacherId) updates.push(db.prepare("UPDATE product_submissions SET billing_user_id=?,data=json_set(data,'$.billingUserId',?,'$.revision',revision+1,'$.updatedAt',?),revision=revision+1 WHERE class_id=? AND billing_user_id=? AND NOT EXISTS (SELECT 1 FROM product_usage u WHERE u.submission_id=product_submissions.id) AND EXISTS (SELECT 1 FROM product_classes WHERE id=? AND data=?)").bind(payer,payer,now(),id,classroom.billingTeacherId,id,JSON.stringify(updated)));
@@ -277,11 +278,7 @@ async function classPayer(db: D1Database, classId: string): Promise<string> {
   const classroom = await getClass(db, classId);
   requireActiveClass(classroom);
   if (!classroom.billingTeacherId) throw new HttpError(409, "반의 이용권 담당 선생님을 먼저 지정해야 합니다.", "BILLING_TEACHER_REQUIRED");
-  try {
-    if (await ownerAccess(db,classroom.billingTeacherId)) {
-      if ((await classMembership(db,classId,classroom.billingTeacherId))?.role !== "teacher") throw new HttpError(403,"담당 선생님이 아닙니다.");
-    } else await requireClassTeacher(db, classId, classroom.billingTeacherId, true);
-  }
+  try { await requireBillingTeacher(db,classId,classroom.billingTeacherId); }
   catch { throw new HttpError(402, "이 반에 지정된 선생님의 이용권을 확인해야 합니다. 학원 학생에게는 별도 요금을 부과하지 않습니다.", "CLASS_ENTITLEMENT_REQUIRED"); }
   return classroom.billingTeacherId;
 }
