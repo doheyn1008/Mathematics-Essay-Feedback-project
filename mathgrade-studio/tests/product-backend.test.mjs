@@ -991,3 +991,53 @@ test('Workers administration requires the configured owner session and exact HTT
   f.sqlite.prepare('UPDATE product_sessions SET expires_at=? WHERE user_id=?').run('2000-01-01T00:00:00.000Z',ownerId);
   assert.equal((await f.call('/api/admin/access', null, undefined, {cookie:renewedCookie})).status, 401);
 });
+
+
+test('administrators delegate independently of account type, audit changes, and lose access immediately on revocation', async t => {
+  const f = fixture(t);
+  for (const id of ['root', 'delegate', 'next', 'ordinary']) await f.register(id, 'personal');
+  const cookies = {};
+  for (const id of ['root', 'delegate', 'next', 'ordinary']) cookies[id] = { cookie: await f.sessionCookie(id) };
+  runtime.DEPLOYMENT_TARGET = 'cloudflare'; runtime.ADMIN_SITE_ORIGIN = 'https://example.test'; runtime.ADMIN_OWNER_USER_ID = 'root';
+  const path = '/api/admin/customers/delegate/admin';
+  const grant = { isAdmin: true, revision: 0 };
+  assert.equal((await f.call(path, null, grant, cookies.ordinary)).status, 403);
+  assert.equal((await f.call(path, 'root', grant)).status, 401);
+  assert.equal((await f.call(path, null, grant, {...cookies.root, noOrigin: true})).status, 403);
+  assert.equal((await f.call(path, null, grant, {...cookies.root, origin: 'https://evil.test'})).status, 403);
+  assert.equal((await f.call(path, null, {...grant, isAdmin: 'true'}, cookies.root)).status, 400);
+  const saved = await f.call(path, null, grant, cookies.root);
+  assert.equal(saved.status, 200); assert.equal(saved.value.customer.isAdmin, true);
+  assert.equal(saved.value.customer.isOwner, false); assert.equal(saved.value.customer.role, 'personal');
+  assert.equal((await f.call('/api/admin/access', null, undefined, cookies.delegate)).status, 200);
+  assert.equal((await f.call('state', null, undefined, cookies.delegate)).value.ownerAccess, undefined);
+  assert.equal((await f.call('state', null, undefined, cookies.delegate)).value.entitlement, null);
+  const next = await f.call('/api/admin/customers/next/admin', null, grant, cookies.delegate);
+  assert.equal(next.status, 200);
+  assert.equal((await f.call('/api/admin/access', null, undefined, cookies.next)).status, 200);
+  assert.equal((await f.call('/api/admin/customers/root/admin', null, {isAdmin: false, revision: 0}, cookies.delegate)).value.code, 'ADMIN_PERMISSION_PROTECTED');
+  assert.equal((await f.call(path, null, {isAdmin: false, revision: 1}, cookies.delegate)).value.code, 'ADMIN_PERMISSION_PROTECTED');
+  const list = await f.call('/api/admin/customers', null, undefined, cookies.root);
+  assert.equal(list.value.items.find(row => row.id === 'root').isOwner, true);
+  assert.equal(list.value.items.find(row => row.id === 'delegate').isAdmin, true);
+  assert.equal((await f.call(path, null, {isAdmin: false, revision: 0}, cookies.root)).status, 409);
+  const revoked = await f.call(path, null, {isAdmin: false, revision: 1}, cookies.root);
+  assert.equal(revoked.status, 200); assert.equal(revoked.value.customer.isAdmin, false);
+  assert.equal((await f.call('/api/admin/access', null, undefined, cookies.delegate)).status, 403);
+  assert.equal((await f.call('/api/admin/customers/ordinary/admin', null, grant, cookies.delegate)).status, 403);
+  const events = f.sqlite.prepare('SELECT actor_id, previous_admin, new_admin FROM product_admin_customer_events WHERE user_id=? ORDER BY revision').all('delegate');
+  assert.deepEqual(events.map(row => [row.actor_id, row.previous_admin, row.new_admin]), [['root', 0, 1], ['root', 1, 0]]);
+});
+
+test('concurrent administrator grants use a shared revision with account type edits', async t => {
+  const f = fixture(t);
+  for (const id of ['root', 'target']) await f.register(id, 'personal');
+  const root = { cookie: await f.sessionCookie('root') };
+  runtime.DEPLOYMENT_TARGET = 'cloudflare'; runtime.ADMIN_SITE_ORIGIN = 'https://example.test'; runtime.ADMIN_OWNER_USER_ID = 'root';
+  const responses = await Promise.all([
+    f.call('/api/admin/customers/target/admin', null, {isAdmin: true, revision: 0}, root),
+    f.call('/api/admin/customers/target', null, {role: 'teacher', revision: 0}, root),
+  ]);
+  assert.deepEqual(responses.map(r => r.status).sort(), [200, 409]);
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM product_admin_customer_events WHERE user_id=?').get('target').n, 1);
+});

@@ -6,7 +6,7 @@ import type {
   CustomerRole,
 } from "../admin-types";
 import { requireAdmin, type AdminActor } from "./admin-auth";
-import { getEntitlement, productDatabase, productJson, readProductJson } from "./product-auth";
+import { getEntitlement, isOwnerAccount, productDatabase, productJson, readProductJson } from "./product-auth";
 import { HttpError } from "./validation";
 
 const pageSize = 25;
@@ -28,14 +28,19 @@ const accountRows = `
   ),
   customers AS (
     SELECT a.id, a.name, c.username, a.role, a.createdAt,
-      COALESCE(m.revision, 0) AS revision
+      COALESCE(m.revision, 0) AS revision, COALESCE(m.is_admin, 0) AS isAdmin
     FROM accounts a
     LEFT JOIN product_credentials c ON c.user_id = a.id
     LEFT JOIN product_admin_customers m ON m.user_id = a.id
   )
 `;
 
-const customerColumns = "id, name, username, role, createdAt, revision";
+const customerColumns = "id, name, username, role, createdAt, revision, isAdmin";
+
+function withAdminStatus<T extends { id: string; isAdmin: boolean | number }>(row: T) {
+  const isOwner = isOwnerAccount(row.id);
+  return { ...row, isOwner, isAdmin: isOwner || Boolean(row.isAdmin) };
+}
 const roleState = `
   SELECT (SELECT account_type FROM product_profiles WHERE user_id = candidate.id) AS role,
     CASE
@@ -110,7 +115,7 @@ async function customerList(db: D1Database, { query, role, page }: Filters): Pro
       FROM accounts`),
   ]);
   return {
-    items: asRows<AdminCustomer>(items),
+    items: asRows<AdminCustomer>(items).map(withAdminStatus),
     page,
     pageSize,
     total: asRows<{ total: number }>(count)[0].total,
@@ -128,7 +133,7 @@ async function customerDetail(db: D1Database, id: string): Promise<AdminCustomer
   const entitlement = await getEntitlement(db, id);
   return {
     customer: {
-      ...row,
+      ...withAdminStatus(row),
       phoneVerified: row.phoneVerified === 1,
       entitlement: entitlement && {
         plan: entitlement.plan,
@@ -235,12 +240,53 @@ function readCustomerId(segment: string): string {
   }
 }
 
+async function updateAdminPermission(db: D1Database, id: string, actor: AdminActor, body: Record<string, unknown>): Promise<AdminCustomerDetail> {
+  const { revision, isAdmin } = body;
+  if (typeof isAdmin !== "boolean" || typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0 || revision >= Number.MAX_SAFE_INTEGER) {
+    throw new HttpError(400, "관리자 권한과 기록 버전을 확인하세요.");
+  }
+  if (isOwnerAccount(id) || id === actor.id) {
+    throw new HttpError(403, "소유자 또는 본인의 관리자 권한은 이 화면에서 변경할 수 없습니다.", "ADMIN_PERMISSION_PROTECTED");
+  }
+  const current = await customerDetail(db, id);
+  if (current.customer.revision !== revision) throw revisionConflict();
+  if (current.customer.isAdmin === isAdmin) return current;
+  if (isAdmin && await db.prepare("SELECT user_id FROM product_closed_accounts WHERE user_id=?").bind(id).first()) {
+    throw new HttpError(409, "탈퇴한 계정에는 관리자 권한을 부여할 수 없습니다.");
+  }
+  const eventId = crypto.randomUUID();
+  const createdAt = new Date().toISOString();
+  const [updated] = await db.batch([
+    db.prepare(`INSERT INTO product_admin_customers (user_id, status, note, revision, updated_at, last_event_id, is_admin)
+      SELECT ?, 'new', '', ?, ?, ?, ?
+      WHERE (? = 1 OR EXISTS (SELECT 1 FROM product_admin_customers WHERE user_id = ? AND is_admin = 1))
+      AND NOT EXISTS (SELECT 1 FROM product_closed_accounts WHERE user_id IN (?, ?))
+      AND (? = 0 OR EXISTS (SELECT 1 FROM product_admin_customers WHERE user_id = ? AND revision = ?))
+      ON CONFLICT (user_id) DO UPDATE SET is_admin = excluded.is_admin, revision = excluded.revision,
+        updated_at = excluded.updated_at, last_event_id = excluded.last_event_id
+      WHERE product_admin_customers.revision = ?`)
+      .bind(id, revision + 1, createdAt, eventId, Number(isAdmin), Number(actor.isOwner), actor.id,
+        id, actor.id, revision, id, revision, revision),
+    db.prepare(`INSERT INTO product_admin_customer_events
+      (id, user_id, status, revision, actor_id, actor_name, created_at, previous_admin, new_admin)
+      SELECT ?, user_id, status, revision, ?, ?, updated_at, ?, ? FROM product_admin_customers
+      WHERE user_id = ? AND last_event_id = ?`)
+      .bind(eventId, actor.id, actor.name, Number(current.customer.isAdmin), Number(isAdmin), id, eventId),
+  ]);
+  if (updated.meta.changes !== 1) throw revisionConflict();
+  return customerDetail(db, id);
+}
+
 export async function handleAdminApi(request: Request, path: string): Promise<Response> {
   const actor = await requireAdmin(request);
   if (request.method === "GET" && path === "access") {
     return productJson({ allowed: true });
   }
   const db = productDatabase();
+  const permission = /^customers\/([^/]+)\/admin$/.exec(path);
+  if (permission && request.method === "POST") {
+    return productJson(await updateAdminPermission(db, readCustomerId(permission[1]), actor, await readProductJson(request)));
+  }
   if (request.method === "GET" && path === "customers") {
     return productJson(await customerList(db, readFilters(new URL(request.url))));
   }

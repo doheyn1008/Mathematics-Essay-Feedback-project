@@ -196,7 +196,7 @@ function CustomerDirectory({ filters, updateFilters, onSelect, onAuthError }: {
                             <div><strong>{customer.name}</strong>{customer.username && <span className="mg-admin-cell-sub">{customer.username}</span>}</div>
                           </div>
                         </td>
-                        <td>{formatRole(customer.role)}</td>
+                        <td>{formatRole(customer.role)}{customer.isAdmin && <span className="mg-admin-cell-sub">{customer.isOwner ? "소유자 · 관리자" : "관리자"}</span>}</td>
                         <td>{formatDate(customer.createdAt)}</td>
                         <td>
                           <button type="button" className="mg-admin-button plain small" aria-label={`${customer.name} 회원 상세`} onClick={() => onSelect(customer.id)}>
@@ -300,6 +300,53 @@ function RoleForm({ customer, onSaved, onReload, onAuthError }: {
   );
 }
 
+function AdminPermissionForm({ customer, onSaved, onReload, onAuthError }: {
+  customer: AdminCustomerDetail["customer"];
+  onSaved(data: AdminCustomerDetail): void;
+  onReload(): void;
+  onAuthError(error: AdminApiError): void;
+}) {
+  const [isAdmin, setIsAdmin] = useState(customer.isAdmin);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [conflict, setConflict] = useState(false);
+  const inFlight = useRef(false);
+  async function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (inFlight.current || conflict || isAdmin === customer.isAdmin) return;
+    inFlight.current = true; setSaving(true); setError("");
+    try {
+      onSaved(await adminRequest<AdminCustomerDetail>(`/api/admin/customers/${encodeURIComponent(customer.id)}/admin`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ isAdmin, revision: customer.revision }),
+      }));
+    } catch (cause) {
+      if (cause instanceof AdminApiError) {
+        if (isAccessError(cause) && cause.code !== "ADMIN_PERMISSION_PROTECTED") onAuthError(cause);
+        if (cause.code === "CUSTOMER_REVISION_CONFLICT") setConflict(true);
+        setError(cause.message);
+      } else setError("연결 상태를 확인하고 다시 시도해 주세요.");
+    } finally { inFlight.current = false; setSaving(false); }
+  }
+  return <form className="mg-admin-role-form" onSubmit={save}>
+    <h2>관리자 권한 관리</h2>
+    {customer.isOwner ? <p className="mg-admin-hint">소유자의 관리자 권한은 서버 설정에서 관리합니다.</p> : <>
+      <label className="mg-admin-field"><span>관리자 권한</span>
+        <select value={String(isAdmin)} disabled={saving || conflict} onChange={event => setIsAdmin(event.target.value === "true")}>
+          <option value="false">일반 회원</option><option value="true">관리자</option>
+        </select>
+      </label>
+      <p className="mg-admin-hint">관리자는 회원 정보를 관리하고 다른 계정에 관리자 권한을 부여하거나 해제할 수 있습니다. 계정 유형·이용권과는 별도입니다.</p>
+      {isAdmin !== customer.isAdmin && <p className="mg-admin-notice" role="status">저장할 변경 · 관리자 권한 {isAdmin ? "부여" : "해제"}</p>}
+      {error && <p className="mg-admin-notice error" role="alert">{error}</p>}
+      <div className="mg-admin-actions">
+        {conflict && <button type="button" className="mg-admin-button" onClick={onReload}>최신 정보 불러오기</button>}
+        <button type="submit" className="mg-admin-button primary" disabled={saving || conflict || isAdmin === customer.isAdmin}>{saving ? "저장 중…" : "관리자 권한 저장"}</button>
+      </div>
+    </>}
+  </form>;
+}
+
 function CustomerDetail({ id, onBack, onAuthError }: { id: string; onBack(): void; onAuthError(error: AdminApiError): void }) {
   const [refresh, setRefresh] = useState(0);
   const [saved, setSaved] = useState<AdminCustomerDetail | null>(null);
@@ -321,14 +368,16 @@ function CustomerDetail({ id, onBack, onAuthError }: { id: string; onBack(): voi
               <Initial name={customer.name} large />
               <div><h1>{customer.name}</h1><p>{formatRole(customer.role)}{customer.username && ` · ${customer.username}`}</p></div>
             </div>
-            {saved && <p className="mg-admin-notice success" role="status">계정 유형을 변경했습니다.</p>}
+            {saved && <p className="mg-admin-notice success" role="status">회원 정보를 변경했습니다.</p>}
             <dl className="mg-admin-definition">
               <div><dt>아이디</dt><dd>{customer.username || "—"}</dd></div>
               <div><dt>가입일</dt><dd>{formatDate(customer.createdAt)}</dd></div>
+              <div><dt>관리자 권한</dt><dd>{customer.isOwner ? "소유자 · 관리자" : customer.isAdmin ? "관리자" : "일반 회원"}</dd></div>
               <div><dt>전화번호 인증</dt><dd>{customer.phoneVerified ? "인증 완료" : "미인증"}</dd></div>
               <div><dt>이용권</dt><dd><EntitlementDescription entitlement={customer.entitlement} /></dd></div>
             </dl>
             <RoleForm key={customer.revision} customer={customer} onSaved={setSaved} onReload={reload} onAuthError={onAuthError} />
+            <AdminPermissionForm key={`admin:${customer.revision}`} customer={customer} onSaved={setSaved} onReload={reload} onAuthError={onAuthError} />
           </>
         ) : <QueryState loading={query.loading} error={query.error} onRetry={reload} />}
       </section>

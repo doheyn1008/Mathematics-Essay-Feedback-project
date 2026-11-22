@@ -211,12 +211,13 @@ export const productSecurityTokens=sqliteTable("product_security_tokens",{
 // Management records also support profiles created before the current login system.
 export const productAdminCustomers = sqliteTable("product_admin_customers", {
   userId: text("user_id").primaryKey(),
+  isAdmin: integer("is_admin").notNull().default(0),
   status: text("status").notNull(),
   note: text("note").notNull(),
   revision: integer("revision").notNull(),
   updatedAt: text("updated_at").notNull(),
   lastEventId: text("last_event_id").notNull(),
-}, table => [check("product_admin_customer_status", sql`${table.status} IN ('new', 'active', 'follow_up', 'closed')`)]);
+}, table => [check("product_admin_customer_status", sql`${table.status} IN ('new', 'active', 'follow_up', 'closed')`), check("product_admin_customer_is_admin", sql`${table.isAdmin} IN (0, 1)`)]);
 
 export const productAdminCustomerEvents = sqliteTable("product_admin_customer_events", {
   id: text("id").primaryKey(),
@@ -228,6 +229,8 @@ export const productAdminCustomerEvents = sqliteTable("product_admin_customer_ev
   createdAt: text("created_at").notNull(),
   previousRole: text("previous_role"),
   newRole: text("new_role"),
+  previousAdmin: integer("previous_admin"),
+  newAdmin: integer("new_admin"),
 }, table => [uniqueIndex("product_admin_event_customer_revision").on(table.userId, table.revision)]);
 
 
