@@ -143,7 +143,7 @@ export async function handleLogin(request: Request, path: string): Promise<Respo
   if (!/^[a-z0-9][a-z0-9_-]{3,39}$/.test(username)) throw new HttpError(400,"아이디는 영문·숫자·밑줄·하이픈으로 4~40자 입력하세요.");
   if (typeof body.password !== "string" || body.password.length > 128) throw new HttpError(400,"비밀번호를 확인하세요.");
   const password = body.password;
-  if (password.length < 10) throw new HttpError(400,"비밀번호는 10자 이상 입력하세요.");
+  if (password.length < 8) throw new HttpError(400,"비밀번호는 8자 이상 입력하세요.");
   await limit(request,username);
   if (path === "signup") {
     const name = requireText(body.displayName,"이름",80);
