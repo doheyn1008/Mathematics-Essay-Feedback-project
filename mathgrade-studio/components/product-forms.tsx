@@ -91,7 +91,7 @@ export function SubmissionForm({ data, classId, action, onDone, selectedExam, tr
     if (!files.some(f => f.role === "answer" || f.role === "mixed")) throw new Error("손글씨 답안 파일을 한 개 이상 첨부하세요.");
     if (personal && !files.some(f => f.role === "problem" || f.role === "mixed") && !selectedExam) throw new Error("문제 파일도 함께 첨부해 주세요. 문제와 풀이가 한 파일이면 ‘문제 + 학생 답안’을 선택하세요.");
     if (!personal && !assignment) throw new Error("선생님이 배정한 시험을 먼저 선택하세요.");
-    if (teacher && !student) throw new Error("대리 제출할 반의 학생을 선택하세요.");
+    if (teacher && !student) throw new Error("답안을 올릴 학생을 선택하세요.");
     const payload = personal ? { usePhoneTrial:trial, title, sourceLabel: source, sourceUrl: selectedExam?.sourceUrl ?? "", examId: selectedExam?.id, question, clientRequestId: requestId } : { assignmentId: assignment!.id, classId, studentId: teacher ? student!.userId : undefined, question, clientRequestId: requestId };
     const result = await action("submissions", packFiles(payload, files)); onDone(result.submission.id);
   } catch (error) { setError(errorText(error)); } finally { setBusy(false); } }

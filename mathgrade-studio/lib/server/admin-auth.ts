@@ -15,7 +15,7 @@ export async function requireAdmin(request: Request): Promise<AdminActor> {
       throw new HttpError(403, "이 환경에서는 관리자 권한이 설정되어 있지 않습니다.", "ADMIN_NOT_CONFIGURED");
     }
     const user = await productSessionIdentity(request);
-    if (!user) throw new HttpError(401, "관리자로 지정된 수식채점실 계정으로 로그인해 주세요.", "ADMIN_SIGN_IN_REQUIRED");
+    if (!user) throw new HttpError(401, "관리자로 지정된 Q.E.D. 계정으로 로그인해 주세요.", "ADMIN_SIGN_IN_REQUIRED");
     if (user.id !== allowedId) throw new HttpError(403, "사이트 소유자만 관리자 화면에 접근할 수 있습니다.", "ADMIN_ACCESS_DENIED");
     if (request.method !== "GET" && request.headers.get("origin") !== origin) {
       throw new HttpError(403, "관리자 사이트에서 직접 요청해 주세요.", "ADMIN_ORIGIN_REQUIRED");
@@ -34,7 +34,7 @@ export async function requireAdmin(request: Request): Promise<AdminActor> {
     throw new HttpError(401, "관리자 ChatGPT 계정으로 로그인해 주세요.", "ADMIN_SIGN_IN_REQUIRED");
   }
   if (email !== allowedEmail) {
-    throw new HttpError(403, "수식채점실 소유자만 관리자 화면에 접근할 수 있습니다.", "ADMIN_ACCESS_DENIED");
+    throw new HttpError(403, "Q.E.D. 소유자만 관리자 화면에 접근할 수 있습니다.", "ADMIN_ACCESS_DENIED");
   }
   if (request.method !== "GET" && request.headers.get("origin") !== origin) {
     throw new HttpError(403, "관리자 사이트에서 직접 요청해 주세요.", "ADMIN_ORIGIN_REQUIRED");

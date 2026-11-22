@@ -123,7 +123,7 @@ export async function handleLogin(request: Request, path: string): Promise<Respo
   const db = productDatabase();
   if (path === "site-session") {
     if (request.headers.get("origin") !== new URL(request.url).origin) {
-      throw new HttpError(403, "수식채점실 로그인 화면에서 다시 시도해 주세요.");
+      throw new HttpError(403, "Q.E.D. 로그인 화면에서 다시 시도해 주세요.");
     }
     if (await isClosedSiteAccount(request, db)) throw new HttpError(403, "탈퇴한 계정입니다.");
     return session(request, await provisionSiteAccount(request, db));

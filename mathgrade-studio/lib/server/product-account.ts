@@ -5,6 +5,8 @@ import type { AccountSettings, ContributionPoint, ExamSubmission, NotificationPr
 import { checkProductOrigin, getProfile, productJson, readProductJson, requireProductUser } from "./product-auth";
 import { authProviders } from "./product-login";
 import { HttpError } from "./validation";
+import { requireAdmin } from "./admin-auth";
+import { isOwnerAccount } from "./product-auth";
 
 export const defaultPreferences: NotificationPreferences = { google: false, kakao: false, submissions: false, feedback: false };
 export function usageRewardPolicy() {
@@ -42,6 +44,19 @@ export async function handleAccount(request: Request, path: string, db: D1Databa
   }
   if (request.method !== "POST") throw new HttpError(404,"요청한 기능을 찾을 수 없습니다.");
   checkProductOrigin(request);
+  if (path === "mode") {
+    const actor = await requireAdmin(request);
+    if (actor.id !== user.id || !isOwnerAccount(user.id)) throw new HttpError(403,"관리자 계정만 모드를 변경할 수 있습니다.","OWNER_MODE_REQUIRED");
+    const body = await readProductJson(request);
+    if (typeof body.mode !== "string" || !["teacher","academy_student","personal_basic","personal_premium"].includes(body.mode)) throw new HttpError(400,"이용 모드를 선택하세요.");
+    if (!await getProfile(db,user.id)) throw new HttpError(403,"계정 등록을 먼저 완료하세요.","PROFILE_REQUIRED");
+    const accountType = body.mode === "teacher" || body.mode === "academy_student" ? body.mode : "personal";
+    await db.batch([
+      db.prepare("INSERT INTO product_owner_modes (user_id,mode,updated_at) VALUES (?,?,?) ON CONFLICT(user_id) DO UPDATE SET mode=excluded.mode,updated_at=excluded.updated_at").bind(user.id,body.mode,new Date().toISOString()),
+      db.prepare("UPDATE product_profiles SET account_type=? WHERE user_id=?").bind(accountType,user.id),
+    ]);
+    return productJson({ mode: body.mode });
+  }
   if (path === "password" || path === "withdraw") return handleSecurity(request,path,db);
   if (path.startsWith("phone/")) return handlePhone(request,path.slice(6),db,user);
   if (path === "points/purchase") throw new HttpError(503,"포인트 상품과 결제 연결을 준비 중입니다. 결제나 포인트 지급은 실행되지 않았습니다.","PAYMENT_NOT_CONFIGURED");

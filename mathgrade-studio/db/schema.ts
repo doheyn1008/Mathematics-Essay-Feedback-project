@@ -230,3 +230,8 @@ export const productAdminCustomerEvents = sqliteTable("product_admin_customer_ev
   newRole: text("new_role"),
 }, table => [uniqueIndex("product_admin_event_customer_revision").on(table.userId, table.revision)]);
 
+
+export const productOwnerModes = sqliteTable("product_owner_modes", {
+  userId: text("user_id").primaryKey().references(() => productProfiles.userId),
+  mode: text("mode").notNull(), updatedAt: text("updated_at").notNull(),
+});

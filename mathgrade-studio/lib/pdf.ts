@@ -122,7 +122,7 @@ export async function generateFeedbackPdf(submissions: Submission[], options: Pd
     pages.push({ page, student });
     y = PAGE.height - PAGE.margin;
     page.drawRectangle({ x: 0, y: PAGE.height - 5, width: PAGE.width, height: 5, color: PURPLE });
-    drawLabel(`수식채점실  /  ${label}`, PAGE.margin, y - 8, 9, width, PURPLE);
+    drawLabel(`Q.E.D.  /  ${label}`, PAGE.margin, y - 8, 9, width, PURPLE);
     y -= 39;
   }
 
@@ -249,8 +249,8 @@ export async function generateFeedbackPdf(submissions: Submission[], options: Pd
     const numbering = `${index + 1} / ${pages.length}`;
     target.drawText(numbering, { x: PAGE.width - PAGE.margin - korean.widthOfTextAtSize(numbering, 8), y: 24, size: 8, font: korean, color: MUTED });
   });
-  document.setTitle(submissions.length === 1 ? `${student} 첨삭 리포트` : "수식채점실 첨삭 리포트 모음");
-  document.setAuthor("수식채점실");
+  document.setTitle(submissions.length === 1 ? `${student} 첨삭 리포트` : "Q.E.D. 첨삭 리포트 모음");
+  document.setAuthor("Q.E.D.");
   document.setLanguage("ko-KR");
   return document.save();
 }
@@ -271,7 +271,7 @@ async function webpToPng(bytes: Uint8Array): Promise<Uint8Array> {
   return new Uint8Array(await result.arrayBuffer());
 }
 
-export async function downloadFeedbackPdf(submissions: Submission[], filename = "수식채점실_첨삭리포트.pdf") {
+export async function downloadFeedbackPdf(submissions: Submission[], filename = "Q.E.D._첨삭리포트.pdf") {
   const bytes = await generateFeedbackPdf(submissions);
   const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: "application/pdf" }));
   const link = window.document.createElement("a");

@@ -119,7 +119,7 @@ export async function handleSecurity(request:Request,path:string,db:D1Database):
   const writes:D1PreparedStatement[]=[db.prepare(`INSERT INTO product_closed_accounts (user_id,closed_at) SELECT ?,? WHERE ${guard} AND ${authGuard}`).bind(user.id,at,user.id,user.id,...authArgs)];
   const run=(sql:string,...args:(string|null)[])=>writes.push(db.prepare(`${sql} AND ${condition}`).bind(...args,user.id,at));
   run("DELETE FROM product_members WHERE user_id=?",user.id);
-  for (const table of ["product_sessions","product_credentials","product_links","product_notification_settings","product_notifications","product_phone_challenges","product_phone_cooldowns","product_recovery_challenges","product_oauth"]) run(`DELETE FROM ${table} WHERE user_id=?`,user.id);
+  for (const table of ["product_owner_modes","product_sessions","product_credentials","product_links","product_notification_settings","product_notifications","product_phone_challenges","product_phone_cooldowns","product_recovery_challenges","product_oauth"]) run(`DELETE FROM ${table} WHERE user_id=?`,user.id);
   run("DELETE FROM product_security_tokens WHERE user_id=?",user.id);
   run("UPDATE product_entitlements SET status='inactive' WHERE user_id=?",user.id);
   run("UPDATE product_profiles SET display_name='탈퇴한 회원' WHERE user_id=?",user.id);

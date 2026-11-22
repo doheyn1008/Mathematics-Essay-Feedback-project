@@ -1,8 +1,10 @@
-# 수식채점실 운영 가이드
+# Q.E.D. 운영 가이드
 
 이 저장소의 운영 앱은 `mathgrade-studio/`이다. 기본 배포 대상은 Cloudflare Workers + D1 + R2이며, 도메인은 `qed.it.kr`을 연결할 수 있다. 기존 Netlify 초안과 ChatGPT Sites 방문 권한·데이터가 자동으로 이전되지는 않는다.
 
 **처음에는 코드 가져오기 → D1/R2 준비 → 첫 배포 → 내 계정 가입 → 관리자 지정 → 도메인 연결 순서로 진행한다.** 이 문서의 명령은 Windows의 VS Code 터미널(PowerShell)에서 실행할 수 있다.
+
+**PowerShell에서 `npm.ps1` 실행 정책 오류가 나면 아래 명령의 `npm`은 `npm.cmd`, `npx`는 `npx.cmd`로 실행한다.** 실행 정책을 바꾸지 않아도 된다. 예: `npm.cmd run install:app`, `npx.cmd wrangler login`.
 
 ## 1. 내 VS Code로 GitHub 코드 가져오기
 
@@ -51,7 +53,7 @@ npm run deploy:check
 
 ## 3. 내 계정에 관리자 권한 주기
 
-이 단계는 아래 5번의 **첫 배포를 완료한 뒤** 진행한다. 관리자 권한은 GitHub 계정이나 ChatGPT 구독에 자동으로 붙지 않는다. 실제 수식채점실에 가입한 계정의 고유 회원 ID를 서버에 지정해야 한다. 일반 로컬 HTTP 개발 서버는 이 HTTPS 관리자 설정 대상이 아니다.
+이 단계는 아래 5번의 **첫 배포를 완료한 뒤** 진행한다. 관리자 권한은 GitHub 계정이나 ChatGPT 구독에 자동으로 붙지 않는다. 실제 Q.E.D.에 가입한 계정의 고유 회원 ID를 서버에 지정해야 한다. 일반 로컬 HTTP 개발 서버는 이 HTTPS 관리자 설정 대상이 아니다.
 
 ### 3-1. 실제 사이트에서 내 계정 가입
 
@@ -132,11 +134,27 @@ npm run deploy
 
 Wrangler가 출력한 `https://Worker이름.계정서브도메인.workers.dev`가 실제 접속 주소다. 이 주소에서 가입·로그인·파일 저장을 확인하고 3번의 관리자 지정 절차를 진행한다. AI·SMS·결제는 배포 성공만으로 연결되지 않는다. Workers 요금제는 로그인·PDF 처리 등 실제 사용량을 확인해 결정한다.
 
+R2 생성 시 `Please enable R2 through the Cloudflare Dashboard`(10042)가 나오면 Cloudflare의 **스토리지 및 데이터베이스 → R2**에서 먼저 활성화한다. 결제 수단 등록을 요청할 수 있으며 포함 사용량을 넘으면 과금된다. 활성화 후 버킷 생성 명령을 다시 실행한다.
+
 ### `qed.it.kr` 연결
 
 Cloudflare DNS에 도메인을 등록하고 안내된 네임서버로 가비아 설정을 맞춘다. 기존 메일·다른 서비스의 DNS 레코드는 보존한다. 해당 Worker의 **Settings → Domains & Routes → Custom Domain**에서 `qed.it.kr`을 연결한다.
 
+네임서버가 Cloudflare로 바뀌어도 Worker 연결은 별도로 해야 한다. Custom Domain을 추가하면 Cloudflare가 DNS 레코드와 인증서를 만든다. 이후 배포에서도 도메인 구성을 유지하려면 자신의 `wrangler.json` 최상위에 다음을 추가한다.
+
+```json
+"routes": [{ "pattern": "qed.it.kr", "custom_domain": true }]
+```
+
+`qed.it.kr`은 운영자가 실제 소유한 도메인으로 맞춘다. 네임서버가 정상이지만 A/AAAA 응답이 없으면 도메인에 사이트가 아직 연결되지 않았는지 확인한다.
+
 이후 `wrangler.json`의 `ADMIN_SITE_ORIGIN`을 `https://qed.it.kr`로 바꾸고 다시 배포한다. 자체 회원 데이터는 같은 DB에 남아 있지만 새 도메인에서는 다시 로그인한다. Google·카카오를 연결했다면 제공자에 등록한 콜백 주소도 새 도메인의 `/api/product/auth/google/callback`, `/api/product/auth/kakao/callback`으로 맞춘다.
+
+### 이번 Q.E.D. 개선 배포
+
+새 버전을 가져온 뒤 앱 폴더에서 `npm.cmd run db:migrate:remote`를 먼저 실행해 `0010_owner_account_modes.sql`을 적용하고 `npm.cmd run deploy`한다. 기존 운영 DB ID와 `DB`·`BUCKET` 바인딩은 보존한다. 소유자 secret은 그대로 사용하며 작업공간 상단에서 이용 모드를 고른다. 기존 회원·반·첨삭을 초기화할 필요가 없다.
+
+하단의 개발자 정보·이메일은 `mathgrade-studio/lib/site-info.ts`에서 관리한다. 약관·개인정보 문서의 원문과 PDF 관리, 정식 시행 전 확인 사항은 [법률 문서 관리](../mathgrade-studio/docs/LEGAL.md)를 참고한다. 현재는 사업자 등록 전이며 문서도 검토안이다.
 
 ## 6. 코드를 고친 뒤 실제 사이트에 반영하기
 

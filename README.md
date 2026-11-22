@@ -1,4 +1,4 @@
-# 수식채점실
+# Q.E.D.
 
 수학 시험과 손글씨 답안을 제출하고 첨삭 기록을 관리하는 앱입니다. **운영 앱은 `mathgrade-studio/` 하나입니다.** Cloudflare Workers + D1 + R2를 사용합니다.
 
