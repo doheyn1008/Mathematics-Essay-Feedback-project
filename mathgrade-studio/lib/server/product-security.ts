@@ -11,7 +11,7 @@ export async function securitySettings(db:D1Database,userId:string) {
   return {username:native?.username ?? null,hasPassword:Boolean(native),recoveryConfigured:Boolean(providerConfig()),withdrawalBlockers:await departureBlockers(db,userId)};
 }
 function newPassword(value:unknown):string {
-  if (typeof value !== "string" || value.length < 10 || value.length > 128) throw new HttpError(400,"새 비밀번호는 10~128자로 입력하세요.");
+  if (typeof value !== "string" || value.length < 8 || value.length > 128) throw new HttpError(400,"새 비밀번호는 8~128자로 입력하세요.");
   return value;
 }
 export async function securityProof(db:D1Database,userId:string,purpose:string) {
