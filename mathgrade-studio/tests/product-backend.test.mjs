@@ -117,7 +117,14 @@ function fixture(t) {
     const work = await assignment(room.id,paper.id);
     return {room,paper,work};
   }
-  return {sqlite,db,objects,call,ok,register,grant,classroom,form,exam,assignment,submit,base};
+  async function sessionCookie(id) {
+    sqlite.prepare("INSERT OR IGNORE INTO product_users (id,name,email,created_at) VALUES (?,?,'',?)").run(id,id,timestamp);
+    const token = crypto.randomUUID().replaceAll('-','') + crypto.randomUUID().replaceAll('-','');
+    const hash = Buffer.from(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(token))).toString('hex');
+    sqlite.prepare('INSERT INTO product_sessions (token_hash,user_id,expires_at) VALUES (?,?,?)').run(hash,id,'2099-01-01T00:00:00.000Z');
+    return `mg_session=${token}`;
+  }
+  return {sqlite,db,objects,call,ok,register,grant,classroom,form,exam,assignment,submit,base,sessionCookie};
 }
 function result(items=[{id:'q1',label:'1번',maxScore:10},{id:'q2',label:'2번',maxScore:20}],summary='수학적 근거를 보완하세요.') {
   return {items:items.map(item=>({itemId:item.id,label:item.label,score:item.maxScore-1,maxScore:item.maxScore,evidence:'조건 확인',feedback:'이유를 명시하세요.',solution:'독립 풀이 검토 내용',uncertainty:''})),total:0,maximum:0,summary,questionResponse:'조건의 근거가 빠져 감점했습니다.',basis:'general',uncertainties:[]};
@@ -887,6 +894,63 @@ test('public Worker ingress rejects forged Sites login and administrator headers
   assert.equal(state.value.profile.accountType, 'personal');
   assert.notEqual(state.value.user.id, 'existing-owner');
   assert.equal((await f.call('/api/admin/access', 'existing-owner', undefined, { ...forged, cookie })).status, 401);
+});
+
+test('only the configured owner can switch all account modes without buying or overwriting an entitlement', async t => {
+  const f=fixture(t);
+  await f.register('owner','teacher'); await f.register('ordinary','personal',true);
+  const owner={cookie:await f.sessionCookie('owner')}, ordinary={cookie:await f.sessionCookie('ordinary')};
+  runtime.DEPLOYMENT_TARGET='cloudflare'; runtime.ADMIN_SITE_ORIGIN='https://example.test'; runtime.ADMIN_OWNER_USER_ID='owner';
+  let response=await f.call('state',null,undefined,owner);
+  assert.equal(response.value.entitlement.source,'owner'); assert.equal(response.value.entitlement.plan,'teacher');
+  assert.equal((await f.call('account/mode',null,{mode:'teacher'},ordinary)).status,403);
+  assert.equal((await f.call('account/mode','owner',{mode:'teacher'})).status,401,'Workers ignores asserted identity even with legacy host login enabled');
+  assert.equal((await f.call('account/mode',null,{mode:'teacher'},{...owner,noOrigin:true})).status,403);
+  assert.equal((await f.call('account/mode',null,{mode:'teacher'},{...owner,origin:'https://evil.test'})).status,403);
+  for (const mode of ['admin',['teacher'],{},true,null]) assert.equal((await f.call('account/mode',null,{mode},owner)).status,400);
+  for (const mode of ['personal_basic','personal_premium','academy_student','teacher']) {
+    response=await f.call('account/mode',null,{mode,userId:'ordinary',status:'active'},owner);
+    assert.equal(response.status,200,JSON.stringify(response.value));
+    const state=(await f.call('state',null,undefined,owner)).value;
+    assert.equal(state.ownerAccess.mode,mode);
+    assert.equal(state.profile.accountType,mode.startsWith('personal_')?'personal':mode);
+    assert.equal(state.entitlement?.plan,mode==='academy_student'?undefined:mode);
+    assert.equal((await f.call('/api/admin/access',null,undefined,owner)).status,200,'ownership persists across modes');
+  }
+  const regular=(await f.call('state',null,undefined,ordinary)).value;
+  assert.equal(regular.ownerAccess,undefined); assert.equal(regular.entitlement.plan,'personal_basic');
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM product_entitlements WHERE user_id=?').get('owner').n,0);
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM product_owner_modes WHERE user_id=?').get('ordinary').n,0);
+  runtime.ADMIN_OWNER_USER_ID='ordinary';
+  assert.equal((await f.call('state',null,undefined,owner)).value.entitlement,null,'revoking ownership immediately removes the free grant');
+  assert.equal((await f.call('account/mode',null,{mode:'personal_premium'},owner)).status,403);
+});
+
+test('owner mode changes preserve classes and student submissions, and analysis records usage without charging a paid grant', async t => {
+  const f=fixture(t); const {room,work}=await f.base('ai_immediate');
+  await f.register('co-teacher','teacher',true);
+  await f.ok('classes/join','co-teacher',{code:room.teacherCode});
+  const owner={cookie:await f.sessionCookie('teacher')},student={cookie:await f.sessionCookie('student')},co={cookie:await f.sessionCookie('co-teacher')};
+  f.sqlite.prepare('DELETE FROM product_entitlements WHERE user_id=?').run('teacher');
+  runtime.DEPLOYMENT_TARGET='cloudflare'; runtime.ADMIN_SITE_ORIGIN='https://example.test'; runtime.ADMIN_OWNER_USER_ID='teacher';
+  assert.equal((await f.call('account/mode',null,{mode:'personal_premium'},owner)).status,200);
+  assert.equal((await f.call('state',null,undefined,owner)).value.classes.length,0);
+  const settings=await f.call(`classes/${room.id}/settings`,null,{name:'공동 관리 반',billingTeacherId:'teacher'},co);
+  assert.equal(settings.status,200,JSON.stringify(settings.value));
+  const sent=await f.call('submissions',null,f.form({assignmentId:work.id,clientRequestId:'owner-funded',question:''},[{role:'answer'}]),student);
+  assert.equal(sent.status,201,JSON.stringify(sent.value));
+  const completed=await ingestAnalysisResult(f.db,sent.value.submission.id,1,result());
+  assert.equal(completed.processing,'completed');
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM product_usage WHERE user_id=?').get('teacher').n,1);
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM product_entitlements WHERE user_id=?').get('teacher').n,0);
+  assert.equal((await f.call('account/mode',null,{mode:'academy_student'},owner)).status,200);
+  assert.equal((await f.call('classes/join',null,{code:room.studentCode},owner)).value.code,'CLASS_ROLE_CONFLICT');
+  assert.equal((await f.call('account/mode',null,{mode:'teacher'},owner)).status,200);
+  const restored=(await f.call('state',null,undefined,owner)).value;
+  assert.equal(restored.classes[0].id,room.id); assert.ok(restored.submissions.some(item=>item.id===completed.id));
+  const created=await f.call('classes',null,{name:'관리자 새 반',billingTeacherId:'teacher'},owner);
+  assert.equal(created.status,201,JSON.stringify(created.value));
+  assert.equal(f.sqlite.prepare('SELECT role FROM product_members WHERE class_id=? AND user_id=?').get(room.id,'teacher').role,'teacher');
 });
 
 test('Workers administration requires the configured owner session and exact HTTPS origin, never role or asserted identity', async t => {

@@ -47,7 +47,7 @@ export async function canContinueSiteAccount(request: Request): Promise<boolean>
 export async function provisionSiteAccount(request: Request, db: D1Database): Promise<string> {
   const user = await eligibleSiteAccount(request, db);
   if (!user) {
-    throw new HttpError(403, "현재 ChatGPT 계정에 연결된 기존 수식채점실 기록을 찾을 수 없습니다.", "LEGACY_SITE_ACCOUNT_UNAVAILABLE");
+    throw new HttpError(403, "현재 ChatGPT 계정에 연결된 기존 Q.E.D. 기록을 찾을 수 없습니다.", "LEGACY_SITE_ACCOUNT_UNAVAILABLE");
   }
 
   await db.prepare(`

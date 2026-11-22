@@ -291,7 +291,7 @@ $("#export").addEventListener("click", () => {
   const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
   const link = document.createElement("a");
   link.href = url;
-  link.download = "수식채점실_확정결과.csv";
+  link.download = "Q.E.D._확정결과.csv";
   document.body.append(link);
   link.click();
   link.remove();

@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import type { AccountType, ClassMember, Entitlement, Exam, Plan, ProductState, Profile } from "../product-types";
+import type { AccountMode, AccountType, ClassMember, Entitlement, Exam, OwnerAccess, Plan, ProductState, Profile } from "../product-types";
 import { HttpError } from "./validation";
 
 export type ProductUser = NonNullable<ProductState["user"]>;
@@ -21,7 +21,8 @@ export async function productIdentity(request: Request): Promise<ProductUser | n
   const user = await productSessionIdentity(request);
   if (user) return user;
   // Optional legacy ingress identity must be explicitly enabled. Local Sites mock auth is never app login.
-  if ((env as unknown as Record<string, unknown>).PRODUCT_HOST_LOGIN !== "true") return null;
+  const config = env as unknown as Record<string, unknown>;
+  if (config.DEPLOYMENT_TARGET === "cloudflare" || config.PRODUCT_HOST_LOGIN !== "true") return null;
   const id = request.headers.get("oai-authenticated-user-id");
   if (!id) return null;
   if (env.DB && await env.DB.prepare("SELECT user_id FROM product_closed_accounts WHERE user_id=?").bind(id).first()) return null;
@@ -55,6 +56,26 @@ export async function readProductJson(request: Request): Promise<Record<string, 
 export async function getProfile(db: D1Database, userId: string): Promise<Profile | null> {
   return db.prepare("SELECT user_id AS userId, account_type AS accountType, display_name AS displayName, created_at AS createdAt FROM product_profiles WHERE user_id = ?").bind(userId).first<Profile>();
 }
+/** A server-configured Workers owner, never a role, email or browser-supplied flag. */
+export function isOwnerAccount(userId: string): boolean {
+  const config = env as unknown as Record<string, unknown>;
+  return config.DEPLOYMENT_TARGET === "cloudflare" && typeof config.ADMIN_OWNER_USER_ID === "string"
+    && Boolean(config.ADMIN_OWNER_USER_ID.trim()) && config.ADMIN_OWNER_USER_ID.trim() === userId;
+}
+export async function ownerAccess(db: D1Database, userId: string): Promise<OwnerAccess | undefined> {
+  if (!isOwnerAccount(userId)) return undefined;
+  if (await db.prepare("SELECT user_id FROM product_closed_accounts WHERE user_id=?").bind(userId).first()) return undefined;
+  const profile = await getProfile(db, userId);
+  if (!profile) return undefined;
+  const stored = await db.prepare("SELECT mode FROM product_owner_modes WHERE user_id=?").bind(userId).first<{mode:AccountMode}>();
+  const mode = profile.accountType === "personal"
+    ? stored?.mode === "personal_basic" ? "personal_basic" : "personal_premium"
+    : profile.accountType;
+  return { mode };
+}
+export function ownerEntitlement(userId: string, plan: Plan): Entitlement {
+  return { userId, plan, status: "active", expiresAt: null, analysisLimit: null, used: 0, source: "owner" };
+}
 export async function requireProfile(db: D1Database, userId: string, allowedTypes?: AccountType[]): Promise<Profile> {
   const profile = await getProfile(db, userId);
   if (!profile) throw new HttpError(403, "계정 유형을 등록한 후 이용하세요.", "PROFILE_REQUIRED");
@@ -62,11 +83,16 @@ export async function requireProfile(db: D1Database, userId: string, allowedType
   return profile;
 }
 export async function getEntitlement(db: D1Database, userId: string): Promise<Entitlement | null> {
+  const access = await ownerAccess(db, userId);
+  if (access) return access.mode === "academy_student" ? null : ownerEntitlement(userId, access.mode);
   const item = await db.prepare("SELECT user_id AS userId, plan, status, expires_at AS expiresAt, analysis_limit AS analysisLimit, used FROM product_entitlements WHERE user_id = ?").bind(userId).first<Entitlement>();
   if (item?.status === "active" && item.expiresAt && (!Number.isFinite(Date.parse(item.expiresAt)) || Date.parse(item.expiresAt) <= Date.now())) return { ...item, status: "inactive" };
   return item;
 }
 export async function requireEntitlement(db: D1Database, userId: string, plans: Plan[]): Promise<Entitlement> {
+  // Ownership is a permanent paid grant. Mode selection changes the workspace;
+  // it must not suspend classes whose billing teacher is the owner.
+  if (await ownerAccess(db, userId)) return ownerEntitlement(userId, plans[0]);
   const item = await getEntitlement(db, userId);
   if (!item || item.status !== "active" || !plans.includes(item.plan)) throw new HttpError(402, "유효한 이용권이 필요합니다. 결제 연결 전에는 예시 체험을 이용할 수 있습니다.", "ENTITLEMENT_REQUIRED");
   return item;
@@ -79,6 +105,13 @@ export async function requireClassTeacher(db: D1Database, classId: string, userI
   const member = await classMembership(db, classId, userId);
   if (member?.role !== "teacher") throw new HttpError(403, "이 반의 담당 선생님만 이용할 수 있습니다.", "CLASS_TEACHER_REQUIRED");
   if (paid) await requireEntitlement(db, userId, ["teacher"]);
+  return member;
+}
+/** Validate the payer independently of the owner's currently selected workspace. */
+export async function requireBillingTeacher(db: D1Database, classId: string, userId: string): Promise<ClassMember> {
+  if (!await ownerAccess(db,userId)) return requireClassTeacher(db,classId,userId,true);
+  const member = await classMembership(db,classId,userId);
+  if (member?.role !== "teacher") throw new HttpError(403,"이 반의 담당 선생님만 비용을 부담할 수 있습니다.","CLASS_TEACHER_REQUIRED");
   return member;
 }
 export async function getExam(db: D1Database, id: string): Promise<Exam> {

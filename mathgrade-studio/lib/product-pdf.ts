@@ -137,7 +137,7 @@ export async function generateExamFeedbackPdf(detail: SubmissionDetail, options:
     pages.push(page);
     page.drawRectangle({ x: 0, y: PAGE.height - 5, width: PAGE.width, height: 5, color: PURPLE });
     y = PAGE.height - PAGE.margin;
-    label(`수식채점실  /  ${section}`, PAGE.margin, y - 8, 9, width, PURPLE);
+    label(`Q.E.D.  /  ${section}`, PAGE.margin, y - 8, 9, width, PURPLE);
     y -= 40;
   }
   function ensure(height: number) { if (y - height < PAGE.bottom) addPage("시험 첨삭 리포트 · 계속"); }
@@ -291,7 +291,7 @@ export async function generateExamFeedbackPdf(detail: SubmissionDetail, options:
     page.drawText(numbering, { x: PAGE.width - PAGE.margin - korean.widthOfTextAtSize(numbering, 8), y: 25, size: 8, font: korean, color: MUTED });
   });
   document.setTitle(`${submission.studentName} - ${submission.exam.title} - v${version.version}`);
-  document.setAuthor("수식채점실");
+  document.setAuthor("Q.E.D.");
   document.setSubject(resultStatus(version));
   document.setCreationDate(generatedAt);
   document.setModificationDate(generatedAt);
@@ -311,7 +311,7 @@ async function webpToPng(bytes: Uint8Array) {
   return new Uint8Array(await blob.arrayBuffer());
 }
 
-export async function downloadExamFeedbackPdf(detail: SubmissionDetail, filename = "수식채점실_시험첨삭리포트.pdf") {
+export async function downloadExamFeedbackPdf(detail: SubmissionDetail, filename = "Q.E.D._시험첨삭리포트.pdf") {
   const bytes = await generateExamFeedbackPdf(detail);
   const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: "application/pdf" }));
   const link = window.document.createElement("a");

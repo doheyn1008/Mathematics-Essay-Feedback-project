@@ -2,7 +2,7 @@
   "name": "mathematics-essay-feedback",
   "version": "0.1.0",
   "private": true,
-  "description": "수식채점실 — Cloudflare Workers 운영 앱",
+  "description": "Q.E.D. — Cloudflare Workers 운영 앱",
   "engines": { "node": ">=22.13.0" },
   "scripts": {
     "install:app": "npm --prefix mathgrade-studio ci",
