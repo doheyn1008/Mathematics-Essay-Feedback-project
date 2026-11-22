@@ -159,13 +159,15 @@ async function joinClass(body: Record<string, unknown>, user: ProductUser): Prom
 }
 async function settingsClass(id: string, body: Record<string, unknown>, user: ProductUser): Promise<Response> {
   const db = productDatabase();
-  await requireClassTeacher(db, id, user.id, true);
+  // Keep the teacher-membership and entitlement checks while allowing the configured owner across modes.
+  await requireBillingTeacher(db, id, user.id);
   const classroom = await getClass(db, id);
   requireActiveClass(classroom);
   const payer = requireText(body.billingTeacherId, "이용권 담당 선생님", 100);
   // Only the selected payer may accept billing responsibility, never another teacher's credits.
   if (payer !== classroom.billingTeacherId && payer !== user.id) throw new HttpError(403, "이용권 담당 변경은 비용을 부담할 선생님 본인이 수락해야 합니다.", "BILLING_CONSENT_REQUIRED");
-  await requireBillingTeacher(db, id, payer);
+  if (payer === classroom.billingTeacherId) await classPayer(db, id);
+  else await requireBillingTeacher(db, id, payer);
   const updated = { ...classroom, name: body.name === undefined ? classroom.name : requireText(body.name,"반 이름",100), billingTeacherId: payer, releaseMode: releaseMode(body.releaseMode, classroom.releaseMode) };
   const updates=[db.prepare("UPDATE product_classes SET data = ? WHERE id = ? AND data=? AND EXISTS (SELECT 1 FROM product_members WHERE class_id=? AND user_id=? AND role='teacher') AND EXISTS (SELECT 1 FROM product_members WHERE class_id=? AND user_id=? AND role='teacher')").bind(JSON.stringify(updated),id,JSON.stringify(classroom),id,user.id,id,payer)];
   if (payer!==classroom.billingTeacherId) updates.push(db.prepare("UPDATE product_submissions SET billing_user_id=?,data=json_set(data,'$.billingUserId',?,'$.revision',revision+1,'$.updatedAt',?),revision=revision+1 WHERE class_id=? AND billing_user_id=? AND NOT EXISTS (SELECT 1 FROM product_usage u WHERE u.submission_id=product_submissions.id) AND EXISTS (SELECT 1 FROM product_classes WHERE id=? AND data=?)").bind(payer,payer,now(),id,classroom.billingTeacherId,id,JSON.stringify(updated)));
