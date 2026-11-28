@@ -1041,3 +1041,51 @@ test('concurrent administrator grants use a shared revision with account type ed
   assert.deepEqual(responses.map(r => r.status).sort(), [200, 409]);
   assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM product_admin_customer_events WHERE user_id=?').get('target').n, 1);
 });
+
+test('withdrawn administrators can have their stored grant revoked without restoring account access', async t => {
+  const f = fixture(t);
+  await f.register('root', 'personal');
+  const root = { cookie: await f.sessionCookie('root') };
+  const signup = await f.call('auth/signup', null, {
+    username: 'withdrawn-admin', password: 'withdrawal-password-example', displayName: '탈퇴할 관리자', accountType: 'personal',
+  });
+  assert.equal(signup.status, 200);
+  const target = f.sqlite.prepare('SELECT user_id FROM product_credentials WHERE username=?').get('withdrawn-admin').user_id;
+  const member = { cookie: signup.headers.get('set-cookie').split(';')[0] };
+  runtime.DEPLOYMENT_TARGET = 'cloudflare'; runtime.ADMIN_SITE_ORIGIN = 'https://example.test'; runtime.ADMIN_OWNER_USER_ID = 'root';
+  const path = `/api/admin/customers/${target}/admin`;
+  assert.equal((await f.call(path, null, { isAdmin: true, revision: 0 }, root)).status, 200);
+  assert.equal((await f.call('account/withdraw', null, {
+    confirmation: '회원 탈퇴', currentPassword: 'withdrawal-password-example',
+  }, member)).status, 200);
+  assert.equal((await f.call('/api/admin/access', null, undefined, member)).status, 401);
+
+  const revoked = await f.call(path, null, { isAdmin: false, revision: 1 }, root);
+  assert.equal(revoked.status, 200, JSON.stringify(revoked.value));
+  assert.equal(revoked.value.customer.isAdmin, false);
+  assert.equal(revoked.value.customer.revision, 2);
+  const event = f.sqlite.prepare('SELECT previous_admin, new_admin FROM product_admin_customer_events WHERE user_id=? AND revision=2').get(target);
+  assert.deepEqual([event.previous_admin, event.new_admin], [1, 0]);
+  assert.equal((await f.call(path, null, { isAdmin: true, revision: 2 }, root)).status, 409);
+  assert.equal((await f.call('/api/admin/access', null, undefined, member)).status, 401);
+});
+
+test('administrator withdrawal between authorization and persistence still blocks permission revocation', async t => {
+  const f = fixture(t);
+  for (const id of ['root', 'actor', 'target']) await f.register(id, 'personal');
+  const root = { cookie: await f.sessionCookie('root') };
+  const actor = { cookie: await f.sessionCookie('actor') };
+  runtime.DEPLOYMENT_TARGET = 'cloudflare'; runtime.ADMIN_SITE_ORIGIN = 'https://example.test'; runtime.ADMIN_OWNER_USER_ID = 'root';
+  for (const id of ['actor', 'target']) {
+    assert.equal((await f.call(`/api/admin/customers/${id}/admin`, null, { isAdmin: true, revision: 0 }, root)).status, 200);
+  }
+  const batch = f.db.batch.bind(f.db);
+  f.db.batch = statements => {
+    f.sqlite.prepare('INSERT INTO product_closed_accounts (user_id, closed_at) VALUES (?, ?)').run('actor', timestamp);
+    return batch(statements);
+  };
+  const denied = await f.call('/api/admin/customers/target/admin', null, { isAdmin: false, revision: 1 }, actor);
+  assert.equal(denied.status, 409);
+  assert.equal(f.sqlite.prepare('SELECT is_admin FROM product_admin_customers WHERE user_id=?').get('target').is_admin, 1);
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM product_admin_customer_events WHERE user_id=?').get('target').n, 1);
+});

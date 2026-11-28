@@ -349,6 +349,8 @@ function AdminPermissionForm({ customer, onSaved, onReload, onAuthError }: {
 
 function CustomerDetail({ id, onBack, onAuthError }: { id: string; onBack(): void; onAuthError(error: AdminApiError): void }) {
   const [refresh, setRefresh] = useState(0);
+  const [roleReset, setRoleReset] = useState(0);
+  const [permissionReset, setPermissionReset] = useState(0);
   const [saved, setSaved] = useState<AdminCustomerDetail | null>(null);
   const query = useAdminQuery<AdminCustomerDetail>(`/api/admin/customers/${encodeURIComponent(id)}`, refresh, onAuthError);
   const customer = (saved ?? query.data)?.customer;
@@ -376,8 +378,8 @@ function CustomerDetail({ id, onBack, onAuthError }: { id: string; onBack(): voi
               <div><dt>전화번호 인증</dt><dd>{customer.phoneVerified ? "인증 완료" : "미인증"}</dd></div>
               <div><dt>이용권</dt><dd><EntitlementDescription entitlement={customer.entitlement} /></dd></div>
             </dl>
-            <RoleForm key={customer.revision} customer={customer} onSaved={setSaved} onReload={reload} onAuthError={onAuthError} />
-            <AdminPermissionForm key={`admin:${customer.revision}`} customer={customer} onSaved={setSaved} onReload={reload} onAuthError={onAuthError} />
+            <RoleForm key={`${customer.id}:${refresh}:${roleReset}`} customer={customer} onSaved={data => { setSaved(data); setRoleReset(value => value + 1); }} onReload={reload} onAuthError={onAuthError} />
+            <AdminPermissionForm key={`${customer.id}:${refresh}:${permissionReset}`} customer={customer} onSaved={data => { setSaved(data); setPermissionReset(value => value + 1); }} onReload={reload} onAuthError={onAuthError} />
           </>
         ) : <QueryState loading={query.loading} error={query.error} onRetry={reload} />}
       </section>

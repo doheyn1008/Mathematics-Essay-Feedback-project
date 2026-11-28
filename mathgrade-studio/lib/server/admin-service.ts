@@ -260,13 +260,14 @@ async function updateAdminPermission(db: D1Database, id: string, actor: AdminAct
     db.prepare(`INSERT INTO product_admin_customers (user_id, status, note, revision, updated_at, last_event_id, is_admin)
       SELECT ?, 'new', '', ?, ?, ?, ?
       WHERE (? = 1 OR EXISTS (SELECT 1 FROM product_admin_customers WHERE user_id = ? AND is_admin = 1))
-      AND NOT EXISTS (SELECT 1 FROM product_closed_accounts WHERE user_id IN (?, ?))
+      AND NOT EXISTS (SELECT 1 FROM product_closed_accounts WHERE user_id = ?)
+      AND (? = 0 OR NOT EXISTS (SELECT 1 FROM product_closed_accounts WHERE user_id = ?))
       AND (? = 0 OR EXISTS (SELECT 1 FROM product_admin_customers WHERE user_id = ? AND revision = ?))
       ON CONFLICT (user_id) DO UPDATE SET is_admin = excluded.is_admin, revision = excluded.revision,
         updated_at = excluded.updated_at, last_event_id = excluded.last_event_id
       WHERE product_admin_customers.revision = ?`)
       .bind(id, revision + 1, createdAt, eventId, Number(isAdmin), Number(actor.isOwner), actor.id,
-        id, actor.id, revision, id, revision, revision),
+        actor.id, Number(isAdmin), id, revision, id, revision, revision),
     db.prepare(`INSERT INTO product_admin_customer_events
       (id, user_id, status, revision, actor_id, actor_name, created_at, previous_admin, new_admin)
       SELECT ?, user_id, status, revision, ?, ?, updated_at, ?, ? FROM product_admin_customers
