@@ -14,22 +14,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-      - name: Check JavaScript syntax
-        run: npm run check
-      - name: Run core tests
-        run: npm test
-      - name: Build static website
-        run: npm run build
-
   mathgrade-studio:
     runs-on: ubuntu-latest
     defaults:
@@ -50,5 +34,9 @@ jobs:
         run: npm test
       - name: Check TypeScript
         run: npx tsc --noEmit
-      - name: Build application
+      - name: Build Cloudflare application
         run: npm run build
+      - name: Validate Worker deployment without publishing
+        run: npm run deploy:check
+      - name: Build optional Sites target
+        run: npm run build:sites

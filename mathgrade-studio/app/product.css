@@ -238,3 +238,11 @@ fieldset:disabled{opacity:.65}.p-account-options{border:0;padding:0}.p-hero h1 e
 .p-admission-evidence ul { display: grid; gap: 10px; margin: 10px 0 0; padding: 0; list-style: none; }
 .p-admission-evidence li { display: grid; gap: 3px; padding: 10px 0 0; border-top: 1px solid var(--p-line, #e5e7eb); }
 .p-admission-evidence li p { margin: 2px 0; }
+
+/* Subtle Q.E.D. watermark behind the landing and account screens. */
+.p-landing,.p-setup{position:relative;isolation:isolate;overflow:hidden}
+.p-landing::before,.p-setup .p-card::before{content:"Q.E.D.";position:absolute;z-index:0;top:31%;left:50%;transform:translate(-50%,-50%) rotate(-11deg);font-family:Georgia,"Times New Roman",serif;font-size:clamp(8rem,20vw,21rem);font-weight:700;letter-spacing:.12em;line-height:1;white-space:nowrap;color:rgba(112,84,180,.055);pointer-events:none;user-select:none}
+.p-landing>*,.p-setup>.p-logo,.p-setup>.p-card{position:relative;z-index:1}
+.p-setup .p-card{isolation:isolate}
+.p-setup .p-card>*{position:relative;z-index:1}
+@media(max-width:600px){.p-landing::before,.p-setup .p-card::before{font-size:clamp(6rem,25vw,10rem);letter-spacing:.08em}}

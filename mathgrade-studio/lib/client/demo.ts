@@ -5,7 +5,7 @@ export const demoQuestion: Question = {
   id: "demo-question", ownerId: "demo-teacher", academyId: "demo-academy", revision: 1,
   title: "닫힌 구간에서의 최댓값과 최솟값", prompt: "닫힌 구간 [0, 3]에서 함수 f(x) = x³ − 3x² + 2의 최댓값과 최솟값을 구하고, 각 값을 갖는 모든 x를 풀이와 함께 쓰시오.",
   university: "", department: "", examKey: "", academicYear: null,
-  sourceUrl: "", sourceLabel: "수식채점실 자체 제작 예시", notes: "f(x)−2=x²(x−3)≤0, f(x)+2=(x−2)²(x+1)≥0과 같은 대안 풀이도 인정합니다.",
+  sourceUrl: "", sourceLabel: "Q.E.D. 자체 제작 예시", notes: "f(x)−2=x²(x−3)≤0, f(x)+2=(x−2)²(x+1)≥0과 같은 대안 풀이도 인정합니다.",
   criteria: [
     {id:"c1",title:"판정 근거와 후보 확인",max:4,description:"도함수 2점, 구간 양 끝점과 내부 임계점 확인 2점. 타당한 대안 풀이도 인정합니다."},
     {id:"c2",title:"함수값의 계산과 비교",max:3,description:"세 후보의 함수값을 비교하거나 상한과 하한을 증명합니다."},

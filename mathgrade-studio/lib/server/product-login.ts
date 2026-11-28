@@ -123,12 +123,15 @@ export async function handleLogin(request: Request, path: string): Promise<Respo
   const db = productDatabase();
   if (path === "site-session") {
     if (request.headers.get("origin") !== new URL(request.url).origin) {
-      throw new HttpError(403, "수식채점실 로그인 화면에서 다시 시도해 주세요.");
+      throw new HttpError(403, "Q.E.D. 로그인 화면에서 다시 시도해 주세요.");
     }
     if (await isClosedSiteAccount(request, db)) throw new HttpError(403, "탈퇴한 계정입니다.");
     return session(request, await provisionSiteAccount(request, db));
   }
   if (path === "logout") {
+    // The UI sends {}. Consume it before an early response so local workerd
+    // releases the request stream and subsequent session reads promptly.
+    if (request.body) await readProductJson(request);
     const token = request.headers.get("cookie")?.match(/(?:^|;\s*)mg_session=([a-f0-9]{64})(?:;|$)/)?.[1];
     if (token) await db.prepare("DELETE FROM product_sessions WHERE token_hash = ?").bind(await tokenHash(token)).run();
     const response = productJson({ok:true}); response.headers.set("Set-Cookie",cookie(request,"mg_session","",0)); return response;
@@ -140,7 +143,7 @@ export async function handleLogin(request: Request, path: string): Promise<Respo
   if (!/^[a-z0-9][a-z0-9_-]{3,39}$/.test(username)) throw new HttpError(400,"아이디는 영문·숫자·밑줄·하이픈으로 4~40자 입력하세요.");
   if (typeof body.password !== "string" || body.password.length > 128) throw new HttpError(400,"비밀번호를 확인하세요.");
   const password = body.password;
-  if (password.length < 10) throw new HttpError(400,"비밀번호는 10자 이상 입력하세요.");
+  if (password.length < 8) throw new HttpError(400,"비밀번호는 8자 이상 입력하세요.");
   await limit(request,username);
   if (path === "signup") {
     const name = requireText(body.displayName,"이름",80);

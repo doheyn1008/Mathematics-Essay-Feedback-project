@@ -50,10 +50,10 @@ function summaryFor(papers: AdmissionHistoryPaper[]): AdmissionLineSummary {
   comparisons.sort((first, second) => second.academicYear - first.academicYear || first.examKey.localeCompare(second.examKey, "ko"));
   const rated = comparisons.filter(paper => paper.difficulty === "foundation" || paper.difficulty === "standard" || paper.difficulty === "advanced");
   const yearCount = new Set(rated.map(paper => paper.academicYear)).size;
-  const advancedAbove = rated.filter(paper => paper.difficulty === "advanced" && paper.gap > 0).length;
+  const advancedAbove = rated.filter(paper => paper.difficulty === "advanced" && paper.total > paper.cutoff).length;
   const enough = rated.length >= minimumStabilityPapers && yearCount >= minimumStabilityYears && !conflicts.size;
   let status: StabilityStatus = "insufficient";
-  if (enough) status = advancedAbove > 0 && comparisons.every(paper => paper.gap > 0) ? "stable" : "below";
+  if (enough) status = advancedAbove > 0 && comparisons.every(paper => paper.total > paper.cutoff) ? "stable" : "below";
   return {
     university: papers[0].university,
     department: papers[0].department,

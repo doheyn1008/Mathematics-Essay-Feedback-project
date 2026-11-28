@@ -6,11 +6,12 @@ import { env } from "cloudflare:workers";
 import type { ClassRoom, Exam, ExamAssignment, ExamFile, ExamFileRole, ExamItem, ExamMessage, ExamSubmission, FeedbackScore, FeedbackVersion, ProductState, ReleaseMode, SubmissionDetail } from "../product-types";
 import type { Question, Submission } from "../types";
 import { HttpError, finiteNumber, optionalText, requireText, sourceUrl } from "./validation";
-import { checkProductOrigin, classMembership, getEntitlement, getExam, getProfile, productDatabase, productIdentity, productJson, readProductJson, requireClassTeacher, requireEntitlement, requireProductUser, requireProfile, type ProductUser } from "./product-auth";
+import { checkProductOrigin, classMembership, getEntitlement, getExam, getProfile, ownerAccess, productDatabase, productIdentity, productJson, readProductJson, requireClassTeacher, requireEntitlement, requireProductUser, requireProfile, type ProductUser } from "./product-auth";
 import { prepareAnalysisInput, validateExamResult } from "./product-analysis";
 import { admissionHistory } from "./product-admission-history";
 import { admissionLine } from "./product-admission-line";
 import { contributionPolicy, getProductContributions } from "./product-contributions";
+import { requireBillingTeacher } from "./product-auth";
 
 type DataRow = { data: string; revision?: number };
 const decode = <T>(row: DataRow): T => JSON.parse(row.data) as T;
@@ -152,6 +153,8 @@ async function joinClass(body: Record<string, unknown>, user: ProductUser): Prom
   if (!row) throw new HttpError(404, "계정 유형에 맞는 반 참여 코드를 확인하세요.");
   const classroom = decode<ClassRoom>(row);
   requireActiveClass(classroom);
+  const priorMember = await classMembership(db,classroom.id,user.id);
+  if (priorMember && priorMember.role !== (teacher ? "teacher" : "student")) throw new HttpError(409,"이 반에는 다른 역할로 참여한 기록이 있습니다. 해당 역할의 이용 모드로 전환하세요.","CLASS_ROLE_CONFLICT");
   const departure = await db.prepare("SELECT status FROM product_departures WHERE class_id=? AND user_id=?").bind(classroom.id,user.id).first<{status:string}>();
   if (departure?.status === "removed") throw new HttpError(403,"선생님이 재참여를 허용한 뒤 같은 코드로 참여할 수 있습니다.","CLASS_REENTRY_BLOCKED");
   await db.prepare("INSERT OR IGNORE INTO product_members (class_id, user_id, role, display_name, joined_at) VALUES (?, ?, ?, ?, ?)").bind(classroom.id, user.id, teacher ? "teacher" : "student", profile.displayName, now()).run();
@@ -159,13 +162,15 @@ async function joinClass(body: Record<string, unknown>, user: ProductUser): Prom
 }
 async function settingsClass(id: string, body: Record<string, unknown>, user: ProductUser): Promise<Response> {
   const db = productDatabase();
-  await requireClassTeacher(db, id, user.id, true);
+  // Keep the teacher-membership and entitlement checks while allowing the configured owner across modes.
+  await requireBillingTeacher(db, id, user.id);
   const classroom = await getClass(db, id);
   requireActiveClass(classroom);
   const payer = requireText(body.billingTeacherId, "이용권 담당 선생님", 100);
   // Only the selected payer may accept billing responsibility, never another teacher's credits.
   if (payer !== classroom.billingTeacherId && payer !== user.id) throw new HttpError(403, "이용권 담당 변경은 비용을 부담할 선생님 본인이 수락해야 합니다.", "BILLING_CONSENT_REQUIRED");
-  await requireClassTeacher(db, id, payer, true);
+  if (payer === classroom.billingTeacherId) await classPayer(db, id);
+  else await requireBillingTeacher(db, id, payer);
   const updated = { ...classroom, name: body.name === undefined ? classroom.name : requireText(body.name,"반 이름",100), billingTeacherId: payer, releaseMode: releaseMode(body.releaseMode, classroom.releaseMode) };
   const updates=[db.prepare("UPDATE product_classes SET data = ? WHERE id = ? AND data=? AND EXISTS (SELECT 1 FROM product_members WHERE class_id=? AND user_id=? AND role='teacher') AND EXISTS (SELECT 1 FROM product_members WHERE class_id=? AND user_id=? AND role='teacher')").bind(JSON.stringify(updated),id,JSON.stringify(classroom),id,user.id,id,payer)];
   if (payer!==classroom.billingTeacherId) updates.push(db.prepare("UPDATE product_submissions SET billing_user_id=?,data=json_set(data,'$.billingUserId',?,'$.revision',revision+1,'$.updatedAt',?),revision=revision+1 WHERE class_id=? AND billing_user_id=? AND NOT EXISTS (SELECT 1 FROM product_usage u WHERE u.submission_id=product_submissions.id) AND EXISTS (SELECT 1 FROM product_classes WHERE id=? AND data=?)").bind(payer,payer,now(),id,classroom.billingTeacherId,id,JSON.stringify(updated)));
@@ -292,7 +297,7 @@ async function classPayer(db: D1Database, classId: string): Promise<string> {
   const classroom = await getClass(db, classId);
   requireActiveClass(classroom);
   if (!classroom.billingTeacherId) throw new HttpError(409, "반의 이용권 담당 선생님을 먼저 지정해야 합니다.", "BILLING_TEACHER_REQUIRED");
-  try { await requireClassTeacher(db, classId, classroom.billingTeacherId, true); }
+  try { await requireBillingTeacher(db,classId,classroom.billingTeacherId); }
   catch { throw new HttpError(402, "이 반에 지정된 선생님의 이용권을 확인해야 합니다. 학원 학생에게는 별도 요금을 부과하지 않습니다.", "CLASS_ENTITLEMENT_REQUIRED"); }
   return classroom.billingTeacherId;
 }
@@ -335,7 +340,7 @@ async function createSubmission(request: Request, user: ProductUser): Promise<Re
     if (!member) throw new HttpError(403, "참여한 반의 시험만 제출할 수 있습니다.");
     if (profile.accountType === "teacher") {
       await requireClassTeacher(db, classId, user.id, true);
-      studentId = requireText(body.studentId, "대리 제출할 학생", 100);
+      studentId = requireText(body.studentId, "답안을 올릴 학생", 100);
       const target = await classMembership(db, classId, studentId);
       const targetProfile = await getProfile(db, studentId);
       if (target?.role !== "student" || targetProfile?.accountType !== "academy_student") throw new HttpError(403, "이 반에 소속된 학원 학생을 선택하세요.");
@@ -469,8 +474,9 @@ export async function ingestAnalysisResult(db: D1Database, id: string, expectedR
   const payer = isTrial ? item.submittedBy : item.classId ? await classPayer(db, item.classId) : item.studentId;
   if (payer !== item.billingUserId) throw new HttpError(409, "제출 후 이용권 담당이 변경되었습니다. 새 요청으로 확인해야 합니다.", "BILLING_CHANGED");
   const entitlement = isTrial ? null : await requireEntitlement(db, payer, item.classId ? ["teacher"] : ["personal_basic", "personal_premium"]);
-  if (entitlement && entitlement.analysisLimit === null) throw new HttpError(503, "첨삭 제공 횟수 정책이 아직 설정되지 않았습니다.", "USAGE_POLICY_NOT_CONFIGURED");
-  if (entitlement && entitlement.used >= entitlement.analysisLimit!) throw new HttpError(429, "이용권의 첨삭 횟수를 모두 사용했습니다.", "USAGE_LIMIT_REACHED");
+  const ownerFunded = entitlement?.source === "owner";
+  if (entitlement && !ownerFunded && entitlement.analysisLimit === null) throw new HttpError(503, "첨삭 제공 횟수 정책이 아직 설정되지 않았습니다.", "USAGE_POLICY_NOT_CONFIGURED");
+  if (entitlement && !ownerFunded && entitlement.used >= entitlement.analysisLimit!) throw new HttpError(429, "이용권의 첨삭 횟수를 모두 사용했습니다.", "USAGE_LIMIT_REACHED");
   const result = validateExamResult(rawResult, item, true);
   const timestamp = now();
   const published = item.releaseMode === "ai_immediate";
@@ -480,9 +486,11 @@ export async function ingestAnalysisResult(db: D1Database, id: string, expectedR
   const notices = published ? await notificationWrites(db,updated,"feedback",`feedback:${version.id}`) : [];
   const reward = usageRewardPolicy();
   const rewardWrites: D1PreparedStatement[] = [];
-  if (item.exam.originContributionId && reward.amount !== null && entitlement?.plan === "personal_premium") rewardWrites.push(db.prepare("INSERT OR IGNORE INTO product_point_events (id,user_id,contribution_id,learner_id,kind,amount,policy_version,created_at) SELECT ?,c.contributor_id,c.id,?,'usage_reward',?,?,? FROM product_contributions c WHERE c.id = ? AND c.status = 'published' AND c.contributor_id != ? AND EXISTS (SELECT 1 FROM product_usage WHERE id = ?)").bind(makeId(),item.studentId,reward.amount,reward.version,timestamp,item.exam.originContributionId,item.studentId,usageId));
+  if (!ownerFunded && item.exam.originContributionId && reward.amount !== null && entitlement?.plan === "personal_premium") rewardWrites.push(db.prepare("INSERT OR IGNORE INTO product_point_events (id,user_id,contribution_id,learner_id,kind,amount,policy_version,created_at) SELECT ?,c.contributor_id,c.id,?,'usage_reward',?,?,? FROM product_contributions c WHERE c.id = ? AND c.status = 'published' AND c.contributor_id != ? AND EXISTS (SELECT 1 FROM product_usage WHERE id = ?)").bind(makeId(),item.studentId,reward.amount,reward.version,timestamp,item.exam.originContributionId,item.studentId,usageId));
   const update = isTrial
     ? db.prepare("UPDATE product_submissions SET data = ?, revision = ? WHERE id = ? AND revision = ? AND EXISTS (SELECT 1 FROM product_phone_trials WHERE user_id = ? AND used_submission_id IS NULL)").bind(JSON.stringify(updated),updated.revision,id,item.revision,payer)
+    : ownerFunded
+    ? db.prepare("UPDATE product_submissions SET data=?,revision=? WHERE id=? AND revision=? AND NOT EXISTS (SELECT 1 FROM product_closed_accounts WHERE user_id=?) AND (? IS NULL OR EXISTS (SELECT 1 FROM product_classes WHERE id=? AND json_extract(data,'$.billingTeacherId')=?))").bind(JSON.stringify(updated),updated.revision,id,item.revision,payer,item.classId,item.classId,payer)
     : db.prepare("UPDATE product_submissions SET data = ?, revision = ? WHERE id = ? AND revision = ? AND EXISTS (SELECT 1 FROM product_entitlements WHERE user_id = ? AND status = 'active' AND analysis_limit IS NOT NULL AND used < analysis_limit AND (expires_at IS NULL OR expires_at > ?)) AND (? IS NULL OR EXISTS (SELECT 1 FROM product_classes WHERE id = ? AND json_extract(data, '$.billingTeacherId') = ?))").bind(JSON.stringify(updated), updated.revision, id, item.revision, payer, timestamp, item.classId, item.classId, payer);
   const debit = isTrial
     ? db.prepare("UPDATE product_phone_trials SET used_submission_id = ?, consumed_at = ? WHERE user_id = ? AND used_submission_id IS NULL AND EXISTS (SELECT 1 FROM product_usage WHERE id = ?)").bind(id,timestamp,payer,usageId)
@@ -491,7 +499,7 @@ export async function ingestAnalysisResult(db: D1Database, id: string, expectedR
     update,
     db.prepare("INSERT INTO product_versions (id, submission_id, version, published, data, created_at) SELECT ?, ?, ?, ?, ?, ? FROM product_submissions WHERE id = ? AND revision = ? AND json_extract(data, '$.latestVersion.id') = ?").bind(version.id, id, version.version, published ? 1 : 0, JSON.stringify(version), timestamp, id, updated.revision, version.id),
     db.prepare("INSERT INTO product_usage (id, user_id, submission_id, created_at) SELECT ?, ?, ?, ? FROM product_versions WHERE id = ?").bind(usageId, payer, id, timestamp, version.id),
-    debit,
+    ...(!ownerFunded ? [debit] : []),
     ...notices, ...rewardWrites,
   ]);
   if (!writes[0].meta.changes) throw new HttpError(409, "기록 또는 이용권이 변경되었습니다.", "REVISION_CONFLICT");
@@ -612,6 +620,7 @@ async function workspaceState(request: Request): Promise<Response> {
   if (!user || !env.DB) return productJson(state);
   const db = productDatabase();
   [state.profile, state.entitlement] = await Promise.all([getProfile(db, user.id), getEntitlement(db, user.id)]);
+  state.ownerAccess = await ownerAccess(db,user.id);
   const values = await db.batch([
     db.prepare("SELECT c.data, m.role FROM product_classes c JOIN product_members m ON c.id = m.class_id WHERE m.user_id = ? ORDER BY c.created_at DESC").bind(user.id),
     db.prepare("SELECT m.class_id AS classId, m.user_id AS userId, m.role, m.display_name AS displayName, m.joined_at AS joinedAt FROM product_members m WHERE m.user_id = ? OR EXISTS (SELECT 1 FROM product_members own WHERE own.class_id = m.class_id AND own.user_id = ? AND own.role = 'teacher')").bind(user.id, user.id),
@@ -636,14 +645,15 @@ async function workspaceState(request: Request): Promise<Response> {
     db.prepare("SELECT s.data, s.revision, a.owner_id FROM submissions s LEFT JOIN academies a ON a.id = s.academy_id WHERE s.student_id = ? OR a.owner_id = ? ORDER BY s.created_at DESC").bind(user.id, user.id),
     db.prepare("SELECT data, revision FROM questions WHERE owner_id = ? ORDER BY created_at DESC").bind(user.id),
   ]);
-  state.classes = (values[0].results as unknown as (DataRow & { role: string })[]).map(row => {
+  const modeRole = state.ownerAccess ? state.profile?.accountType === "teacher" ? "teacher" : state.profile?.accountType === "academy_student" ? "student" : "personal" : null;
+  state.classes = (values[0].results as unknown as (DataRow & { role: string })[]).filter(row=>!modeRole || row.role===modeRole).map(row => {
     const classroom = decode<ClassRoom>(row);
     return row.role === "teacher" ? classroom : { ...classroom, studentCode: undefined, teacherCode: undefined };
   });
   state.members = values[1].results as unknown as ProductState["members"];
   state.departures=(await db.prepare("SELECT d.class_id AS classId,d.user_id AS userId,d.status,p.display_name AS displayName FROM product_departures d JOIN product_profiles p ON p.user_id=d.user_id WHERE d.status='removed' AND EXISTS (SELECT 1 FROM product_members m WHERE m.class_id=d.class_id AND m.user_id=? AND m.role='teacher')").bind(user.id).all<NonNullable<ProductState["departures"]>[number]>()).results;
   state.exams = (values[2].results as unknown as DataRow[]).map(row => ({ ...decode<Exam>(row), revision: row.revision! })).filter(exam=>!exam.deletedAt);
-  state.assignments = (values[3].results as unknown as (DataRow & { role: string })[]).map(row => {
+  state.assignments = (values[3].results as unknown as (DataRow & { role: string })[]).filter(row=>!modeRole || row.role===modeRole).map(row => {
     const item = decode<ExamAssignment>(row);
     return row.role === "teacher" ? item : { ...item, exam: studentExam(item.exam) };
   });
