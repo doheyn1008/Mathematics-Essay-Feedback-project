@@ -179,3 +179,42 @@ test('demo management preserves fixed codes, blocks removed students and keeps h
   demo.persona='teacher';await demo.request('assignments/assignment-a/cancel',{revision:1});
   await assert.rejects(()=>demo.request('submissions/sub-a/materials',pack({revision:after.submission.revision,clientRequestId:'cancelled',retainedFileIds:[]},[{role:'answer'}])),e=>e.code==='ASSIGNMENT_CANCELLED');
 });
+
+test('demo grading applies a synthetic rubric and exposes teacher-reviewed partial credit', async () => {
+  const demo = new ProductDemo();
+  const exam = await makeExam(demo, {
+    items: [{ id: 'derivative', label: '극값 조건', maxScore: 10, criteria: '도함수의 부호 변화를 설명' }],
+  }, [{ role: 'problem', text: '%PDF-when-is-a-stationary-point-an-extremum' },
+      { role: 'rubric', text: '%PDF-check-sign-change' }]);
+  const { assignment } = await demo.request('assignments', { examId: exam.id, classId: 'class-a', title: '극값 연습' });
+  demo.persona = 'academy_student';
+  const { submission } = await demo.request('submissions', pack({
+    assignmentId: assignment.id, clientRequestId: 'synthetic-derivative', question: '도함수가 0이면 충분한가요?',
+  }, [{ role: 'answer', text: '%PDF-derivative-equals-zero' }]));
+  assert.equal(submission.latestVersion, null);
+
+  demo.persona = 'teacher';
+  const review = {
+    basis: 'provided', summary: '증가와 감소를 함께 확인하세요.', questionResponse: '좌우의 부호 변화가 필요합니다.',
+    items: [{
+      itemId: 'derivative', label: '극값 조건', score: 11, maxScore: 10,
+      evidence: '도함수가 0인 점을 찾았습니다.', feedback: '좌우 부호를 비교하세요.',
+    }],
+  };
+  const endpoint = 'submissions/' + submission.id + '/review';
+  await assert.rejects(
+    demo.request(endpoint, { revision: submission.revision, result: review, publish: true }),
+    error => error.status === 400,
+  );
+  review.items[0].score = 6;
+  const published = await demo.request(endpoint, { revision: submission.revision, result: review, publish: true });
+  assert.equal(published.submission.latestVersion.result.total, 6);
+  assert.equal(published.submission.latestVersion.result.maximum, 10);
+
+  demo.persona = 'academy_student';
+  const visible = demo.detail(submission.id).submission.latestVersion;
+  assert.equal(visible.authorType, 'teacher');
+  assert.equal(visible.published, true);
+  assert.equal(visible.result.basis, 'provided');
+  assert.equal(visible.result.items[0].feedback, '좌우 부호를 비교하세요.');
+});
