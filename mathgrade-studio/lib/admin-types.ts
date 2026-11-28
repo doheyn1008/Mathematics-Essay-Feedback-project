@@ -7,6 +7,8 @@ export type AdminCustomer = {
   role: CustomerRole | null;
   createdAt: string;
   revision: number;
+  isAdmin: boolean;
+  isOwner: boolean;
 };
 
 export type AdminCustomerList = {
