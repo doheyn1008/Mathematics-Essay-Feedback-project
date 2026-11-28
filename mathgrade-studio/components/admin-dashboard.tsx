@@ -378,8 +378,8 @@ function CustomerDetail({ id, onBack, onAuthError }: { id: string; onBack(): voi
               <div><dt>전화번호 인증</dt><dd>{customer.phoneVerified ? "인증 완료" : "미인증"}</dd></div>
               <div><dt>이용권</dt><dd><EntitlementDescription entitlement={customer.entitlement} /></dd></div>
             </dl>
-            <RoleForm key={`${customer.id}:${refresh}:${roleReset}`} customer={customer} onSaved={data => { setSaved(data); setRoleReset(value => value + 1); }} onReload={reload} onAuthError={onAuthError} />
-            <AdminPermissionForm key={`${customer.id}:${refresh}:${permissionReset}`} customer={customer} onSaved={data => { setSaved(data); setPermissionReset(value => value + 1); }} onReload={reload} onAuthError={onAuthError} />
+            <RoleForm key={`role:${customer.id}:${refresh}:${roleReset}`} customer={customer} onSaved={data => { setSaved(data); setRoleReset(value => value + 1); }} onReload={reload} onAuthError={onAuthError} />
+            <AdminPermissionForm key={`admin:${customer.id}:${refresh}:${permissionReset}`} customer={customer} onSaved={data => { setSaved(data); setPermissionReset(value => value + 1); }} onReload={reload} onAuthError={onAuthError} />
           </>
         ) : <QueryState loading={query.loading} error={query.error} onRetry={reload} />}
       </section>
