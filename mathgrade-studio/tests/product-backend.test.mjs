@@ -13,11 +13,13 @@ const scratch = await mkdtemp(join(tmpdir(), 'mathgrade-product-backend-'));
 const runtime = {};
 globalThis.__productBackendTestEnv = runtime;
 await writeFile(join(scratch, 'env.mjs'), 'export const env = globalThis.__productBackendTestEnv;');
-for (const filename of (await readdir(join(appDir, 'lib/server'))).filter(name => name.endsWith('.ts'))) {
+const serverModules = (await readdir(join(appDir, 'lib/server'))).filter(name => name.endsWith('.ts'));
+for (const filename of ['../exam-difficulty.ts', ...serverModules]) {
   const source = (await readFile(join(appDir, 'lib/server', filename), 'utf8'))
     .replace(/from "cloudflare:workers"/g, 'from "./env.mjs"')
+    .replace('from "../exam-difficulty"', 'from "./exam-difficulty.mjs"')
     .replace(/from "\.\/([^".]+)"/g, 'from "./$1.mjs"');
-  await writeFile(join(scratch, filename.replace(/\.ts$/, '.mjs')), ts.transpileModule(source, {
+  await writeFile(join(scratch, filename.split('/').at(-1).replace(/\.ts$/, '.mjs')), ts.transpileModule(source, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
   }).outputText);
 }
@@ -225,6 +227,41 @@ test('personal file-only and mixed submissions need no pre-registered rubric; an
   assert.equal(failure.status,503); assert.equal(failure.value.code,'AI_NOT_CONFIGURED');
   assert.equal((await f.ok('state','personal')).entitlement.used,0);
   assert.equal((await f.call(`submissions/${submission.id}/result`,'personal',{result:result()})).status,404);
+});
+
+test('exam difficulty guides analysis from the assigned revision without changing rubric scores', async t => {
+  const f = fixture(t);
+  const { room, paper } = await f.base();
+  const update = {
+    id: paper.id, classId: room.id, title: paper.title, sourceLabel: paper.sourceLabel,
+    items: paper.items.map((item, index) => ({ ...item, criteria: index === 0 ? '공식 부분점수 기준' : item.criteria })),
+    releaseMode: paper.releaseMode,
+  };
+  const invalid = await f.call('exams', 'teacher', f.form({ ...update, revision: 1, difficulty: 'guess' }, []));
+  assert.equal(invalid.value.code, 'INVALID_EXAM_DIFFICULTY');
+
+  const saved = (await f.ok('exams', 'teacher', f.form({ ...update, revision: 1, difficulty: 'advanced' }, []))).exam;
+  assert.equal(saved.difficulty, 'advanced');
+  const retained = (await f.ok('exams', 'teacher', f.form({ ...update, revision: saved.revision }, []))).exam;
+  assert.equal(retained.difficulty, 'advanced');
+  const pastPaper = await f.assignment(room.id, paper.id);
+  const current = (await f.ok('exams', 'teacher', f.form({ ...update, revision: retained.revision, difficulty: null }, []))).exam;
+  assert.equal('difficulty' in current, false);
+
+  const submission = await f.submit('student', pastPaper.id);
+  assert.equal(submission.exam.difficulty, 'advanced');
+  const privateSnapshot = (await f.ok(`submissions/${submission.id}`, 'teacher')).submission;
+  const input = prepareAnalysisInput(privateSnapshot);
+  assert.equal(input.difficulty, 'advanced');
+  assert.match(input.difficultyGuidance, /경계·예외/);
+  assert.match(input.instructions, /채점기준과 배점을 우선 적용/);
+  assert.equal(input.items[0].criteria, '공식 부분점수 기준');
+
+  const accepted = await f.ok(`submissions/${submission.id}/review`, 'teacher', {
+    revision: 1, publish: true, result: { ...result(), basis: 'provided' },
+  });
+  assert.equal(accepted.version.result.total, 28);
+  assert.equal(accepted.version.result.maximum, 30);
 });
 
 test('drafts stay private, published results survive later drafts, and revisions preserve teacher history',async t=>{
@@ -873,6 +910,130 @@ test('verified existing Sites members can resume the same profile through explic
   assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS count FROM product_users WHERE id=?').get('existing-teacher').count, 1);
   assert.equal((await f.call('auth/logout', null, {}, { cookie })).status, 200);
   assert.equal((await f.call('state', 'existing-teacher', undefined, { ...host, cookie })).value.user, null);
+});
+
+test('assigned teachers see the first AI score after a draft and later teacher revision', async t => {
+  const f = fixture(t);
+  const { room, work } = await f.base();
+  await f.register('co-teacher', 'teacher', true);
+  await f.register('other-teacher', 'teacher');
+  await f.ok('classes/join', 'co-teacher', { code: room.teacherCode });
+  const submission = await f.submit('student', work.id);
+  const endpoint = `submissions/${submission.id}`;
+  const findRecord = async user => (await f.ok('state', user)).submissions.find(item => item.id === submission.id);
+
+  assert.equal((await findRecord('teacher')).firstFeedbackScore, null);
+  await f.ok(`${endpoint}/review`, 'teacher', { revision: 1, result: result(), publish: false });
+  assert.equal((await f.ok(endpoint, 'teacher')).submission.firstFeedbackScore, null);
+  assert.equal((await findRecord('teacher')).firstFeedbackScore, null);
+
+  const ai = result();
+  ai.items[0].score = 6;
+  await ingestAnalysisResult(f.db, submission.id, 2, ai);
+  const first = { total: 25, maximum: 30 };
+  assert.deepEqual((await findRecord('teacher')).firstFeedbackScore, first);
+  const studentBeforeReview = await findRecord('student');
+  assert.equal(studentBeforeReview.latestVersion, null);
+  assert.equal('firstFeedbackScore' in studentBeforeReview, false);
+
+  await f.ok(`${endpoint}/review`, 'teacher', { revision: 3, result: result(), publish: true });
+  const teacherRecord = await findRecord('teacher');
+  assert.equal(teacherRecord.latestVersion.result.total, 28);
+  assert.deepEqual(teacherRecord.firstFeedbackScore, first);
+  assert.deepEqual((await findRecord('co-teacher')).firstFeedbackScore, first);
+  assert.deepEqual((await f.ok(endpoint, 'teacher')).submission.firstFeedbackScore, first);
+  assert.equal('firstFeedbackScore' in (await f.ok(endpoint, 'student')).submission, false);
+  assert.equal(await findRecord('other-teacher'), undefined);
+  assert.equal((await f.call(endpoint, 'other-teacher')).status, 403);
+});
+
+test('a zero first teacher score survives a later AI result', async t => {
+  const f = fixture(t);
+  const { work } = await f.base();
+  const submission = await f.submit('student', work.id);
+  const endpoint = `submissions/${submission.id}`;
+  const manual = result();
+  for (const item of manual.items) item.score = 0;
+  await f.ok(`${endpoint}/review`, 'teacher', { revision: 1, result: manual, publish: true });
+  await ingestAnalysisResult(f.db, submission.id, 2, result());
+  const detail = await f.ok(endpoint, 'teacher');
+  assert.equal(detail.submission.latestVersion.result.total, 28);
+  assert.deepEqual(detail.submission.firstFeedbackScore, { total: 0, maximum: 30 });
+  const teacherRecord = (await f.ok('state', 'teacher')).submissions.find(item => item.id === submission.id);
+  assert.deepEqual(teacherRecord.firstFeedbackScore, { total: 0, maximum: 30 });
+});
+
+test('admission comparison uses approved scores and exact exam scope, then accumulates only the selected student’s approved papers', async t => {
+  const f = fixture(t);
+  const { room, work } = await f.base();
+  await f.register('unrelated-teacher', 'teacher', true);
+  const first = await f.submit('student', work.id);
+  const endpoint = `submissions/${first.id}/admission-line`;
+  const history = `submissions/${first.id}/admission-history`;
+  const reference = {
+    university: '검증용 대학', department: '논술전형 · 자연계열', academicYear: 2025, examKey: '수리논술 전체',
+    score: 22, sourceLabel: '검증용 공개 자료', sourceUrl: 'https://example.test/admission', comparableFullExam: true,
+  };
+
+  assert.deepEqual(await f.ok(endpoint, 'teacher'), { score: null, references: [] });
+  assert.equal((await f.call(endpoint, 'teacher', reference)).value.code, 'ADMISSION_SCORE_NOT_READY');
+  assert.equal((await f.call(endpoint, 'student')).value.code, 'ADMISSION_LINE_ACCESS_DENIED');
+  assert.equal((await f.call(history, 'unrelated-teacher')).status, 403);
+
+  await ingestAnalysisResult(f.db, first.id, 1, result());
+  assert.equal((await f.ok(endpoint, 'teacher')).score, null);
+  await f.ok(`submissions/${first.id}/review`, 'teacher', { revision: 2, result: result(), publish: true });
+  const draft = result();
+  draft.items[0].score = 0;
+  await f.ok(`submissions/${first.id}/review`, 'teacher', { revision: 3, result: draft, publish: false });
+  assert.deepEqual((await f.ok(endpoint, 'teacher')).score, { total: 28, maximum: 30 });
+  assert.equal((await f.call(endpoint, 'teacher', { ...reference, comparableFullExam: false })).status, 400);
+  assert.equal((await f.call(endpoint, 'teacher', { ...reference, sourceUrl: 'javascript:alert(1)' })).status, 400);
+  assert.equal((await f.call(endpoint, 'teacher', { ...reference, score: 31 })).status, 400);
+  const saved = await f.ok(endpoint, 'teacher', reference, 201);
+  assert.equal(saved.references[0].scale, 30);
+  assert.equal((await f.ok(endpoint, 'teacher', reference)).references.length, 1);
+  assert.equal((await f.call(endpoint, 'teacher', { ...reference, academicYear: 2024 })).value.code, 'ADMISSION_REFERENCE_CONFLICT');
+  await f.ok(endpoint, 'teacher', { ...reference, score: 23, id: saved.references[0].id, revision: saved.references[0].revision });
+
+  const olderPaper = await f.exam('teacher', room.id, { title: '다른 과거 기출', difficulty: 'advanced' });
+  const olderWork = await f.assignment(room.id, olderPaper.id);
+  const older = await f.submit('student', olderWork.id);
+  await f.ok(`submissions/${older.id}/review`, 'teacher', { revision: 1, result: result(), publish: true });
+  await f.ok(`submissions/${older.id}/admission-line`, 'teacher', { ...reference, academicYear: 2024, score: 25 }, 201);
+  await f.ok('classes/join', 'outsider', { code: room.studentCode });
+  const otherStudent = await f.submit('outsider', olderWork.id);
+  await f.ok(`submissions/${otherStudent.id}/review`, 'teacher', { revision: 1, result: result(), publish: true });
+
+  const { papers } = await f.ok(history, 'teacher');
+  assert.equal(papers.length, 2);
+  const reported = papers.find(paper => paper.submissionId === first.id);
+  assert.equal(reported.total, 28);
+  assert.equal(reported.cutoff, 23);
+  assert.equal(reported.academicYear, 2025);
+  assert.equal(papers.find(paper => paper.submissionId === older.id).difficulty, 'advanced');
+  assert.ok(papers.every(paper => !('result' in paper) && !('studentId' in paper)));
+  assert.equal((await f.call(history, 'student')).value.code, 'ADMISSION_LINE_ACCESS_DENIED');
+});
+
+test('personal admission history stays private and accepts a completed published personal result', async t => {
+  const f = fixture(t);
+  await f.register('personal', 'personal', true);
+  await f.register('other-personal', 'personal', true);
+  const submission = await f.submit('personal', undefined, { title: '개인 수리논술', sourceLabel: '검증용 기출 자료', difficulty: 'standard' }, [{ role: 'mixed' }]);
+  const endpoint = `submissions/${submission.id}/admission-line`;
+  const history = `submissions/${submission.id}/admission-history`;
+  assert.deepEqual(await f.ok(history, 'personal'), { papers: [] });
+  await ingestAnalysisResult(f.db, submission.id, 1, result());
+  await f.ok(endpoint, 'personal', {
+    university: '검증용 대학', department: '논술전형 자연계열', academicYear: 2025, examKey: '자연 수리논술 전체',
+    comparableFullExam: true, score: 22, sourceUrl: 'https://example.test/cutoff', sourceLabel: '공개 입시 자료',
+  }, 201);
+  const { papers } = await f.ok(history, 'personal');
+  assert.equal(papers.length, 1);
+  assert.equal(papers[0].difficulty, 'standard');
+  assert.equal(papers[0].total, 28);
+  assert.equal((await f.call(history, 'other-personal')).status, 403);
 });
 
 test('public Worker ingress rejects forged Sites login and administrator headers while app sessions work', async t => {

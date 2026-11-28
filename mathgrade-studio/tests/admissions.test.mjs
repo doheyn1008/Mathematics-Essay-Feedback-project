@@ -28,6 +28,14 @@ test('average, percentile and school grade do not become essay minima', () => {
   assert.equal(forecastCutoff([2023, 2024, 2025].map(y => reference(y, 70, { metric: 'average' })), 2026).status, 'insufficient');
 });
 
+test('cutoff position uses full precision while the displayed gap stays rounded', () => {
+  for (const [cutoff, position] of [[74.999, 'above'], [75, 'equal'], [75.001, 'below']]) {
+    const { comparisons } = comparePastCutoffs([student({ score: 75 })], [reference(2025, cutoff)]);
+    assert.equal(comparisons[0].position, position);
+    assert.equal(Math.abs(comparisons[0].gap), 0);
+  }
+});
+
 test('rejects invalid numbers, out of range scores, and invalid source links', () => {
   const rows = [reference(2025, NaN), reference(2025, 101), reference(2025, 70, { scale: 0 }),
     reference(2025, 70, { sourceUrl: 'javascript:alert(1)' })];

@@ -1,12 +1,15 @@
+import { isExamDifficulty, type ExamDifficulty } from "../exam-difficulty";
 import { phoneTrial, requirePhoneTrial } from "./product-phone";
 import { handleManagement, managedClass, requireActiveClass, requireCurrentStudent } from "./product-management";
 import { notificationWrites, pointLedger, usageRewardPolicy } from "./product-account";
 import { env } from "cloudflare:workers";
-import type { ClassRoom, Exam, ExamAssignment, ExamFile, ExamFileRole, ExamItem, ExamMessage, ExamSubmission, FeedbackVersion, ProductState, ReleaseMode, SubmissionDetail } from "../product-types";
+import type { ClassRoom, Exam, ExamAssignment, ExamFile, ExamFileRole, ExamItem, ExamMessage, ExamSubmission, FeedbackScore, FeedbackVersion, ProductState, ReleaseMode, SubmissionDetail } from "../product-types";
 import type { Question, Submission } from "../types";
 import { HttpError, finiteNumber, optionalText, requireText, sourceUrl } from "./validation";
 import { checkProductOrigin, classMembership, getEntitlement, getExam, getProfile, ownerAccess, productDatabase, productIdentity, productJson, readProductJson, requireClassTeacher, requireEntitlement, requireProductUser, requireProfile, type ProductUser } from "./product-auth";
 import { prepareAnalysisInput, validateExamResult } from "./product-analysis";
+import { admissionHistory } from "./product-admission-history";
+import { admissionLine } from "./product-admission-line";
 import { contributionPolicy, getProductContributions } from "./product-contributions";
 import { requireBillingTeacher } from "./product-auth";
 
@@ -175,6 +178,12 @@ async function settingsClass(id: string, body: Record<string, unknown>, user: Pr
   if (!writes[0].meta.changes) throw new HttpError(409,"반 설정이나 담당자가 변경되었습니다.","REVISION_CONFLICT");
   return productJson({ classroom: updated });
 }
+function parseExamDifficulty(value: unknown, previous?: ExamDifficulty): ExamDifficulty | undefined {
+  if (value === undefined) return previous;
+  if (value === null || value === "") return undefined;
+  if (!isExamDifficulty(value)) throw new HttpError(400, "시험 난이도를 확인하세요.", "INVALID_EXAM_DIFFICULTY");
+  return value;
+}
 async function saveExam(request: Request, user: ProductUser): Promise<Response> {
   const db = productDatabase();
   const profile = await requireProfile(db, user.id, ["teacher", "personal"]);
@@ -205,7 +214,7 @@ async function saveExam(request: Request, user: ProductUser): Promise<Response> 
   if (retained.length + files.length > maximumFiles) throw new HttpError(400, "시험 자료는 최대 12개까지 등록할 수 있습니다.");
   if (retained.reduce((sum, file) => sum + file.size, 0) + files.reduce((sum, entry) => sum + entry.file.size, 0) > maximumTotal) throw new HttpError(413, "시험 자료의 전체 용량은 60MB 이하여야 합니다.");
   const classroom = classId ? await getClass(db, classId) : null;
-  const exam: Exam = { id, ownerId: user.id, classId, title: requireText(body.title, "시험 이름", 200), sourceLabel: body.sourceLabel === undefined ? previous?.sourceLabel ?? "" : optionalText(body.sourceLabel, "문제 출처", 500), sourceUrl: body.sourceUrl === undefined ? previous?.sourceUrl ?? "" : sourceUrl(body.sourceUrl), items, files: [], releaseMode: releaseMode(body.releaseMode, classroom?.releaseMode ?? (profile.accountType === "personal" ? "ai_immediate" : "teacher_review")), revision: (previous?.revision ?? 0) + 1, createdAt: previous?.createdAt ?? now(), ...(previous?.originContributionId ? { originContributionId: previous.originContributionId } : {}) };
+  const exam: Exam = { id, ownerId: user.id, classId, difficulty: parseExamDifficulty(body.difficulty, previous?.difficulty), title: requireText(body.title, "시험 이름", 200), sourceLabel: body.sourceLabel === undefined ? previous?.sourceLabel ?? "" : optionalText(body.sourceLabel, "문제 출처", 500), sourceUrl: body.sourceUrl === undefined ? previous?.sourceUrl ?? "" : sourceUrl(body.sourceUrl), items, files: [], releaseMode: releaseMode(body.releaseMode, classroom?.releaseMode ?? (profile.accountType === "personal" ? "ai_immediate" : "teacher_review")), revision: (previous?.revision ?? 0) + 1, createdAt: previous?.createdAt ?? now(), ...(previous?.originContributionId ? { originContributionId: previous.originContributionId } : {}) };
   const stored = await storeFiles(files, user.id, id, null);
   exam.files = [...retained, ...stored.files].map((file, order) => ({ ...file, order }));
   try {
@@ -274,7 +283,15 @@ async function getDetail(db: D1Database, id: string, user: ProductUser): Promise
   const materialRows=await db.prepare("SELECT data FROM product_submission_materials WHERE submission_id=? ORDER BY version DESC").bind(id).all<DataRow>();
   const materials=materialRows.results.map(decode<import("../product-types").SubmissionMaterial>);
   if (!materials.length) materials.push(materialSnapshot(item));
-  return { submission: await visibleSubmission(db, item, teacher), versions: (versions.results as unknown as DataRow[]).map(decode<FeedbackVersion>), messages: (messages.results as unknown as (DataRow & {sequence:number})[]).map(row=>({...decode<ExamMessage>(row),sequence:row.sequence})), materials };
+  const history = (versions.results as unknown as DataRow[]).map(decode<FeedbackVersion>);
+  const submission = await visibleSubmission(db, item, teacher);
+  if (teacher) {
+    const first = history.findLast(version =>
+      version.authorType === "ai" || (version.authorType === "teacher" && version.published && version.teacherReviewed)
+    );
+    submission.firstFeedbackScore = first ? { total: first.result.total, maximum: first.result.maximum } : null;
+  }
+  return { submission, versions: history, messages: (messages.results as unknown as (DataRow & {sequence:number})[]).map(row=>({...decode<ExamMessage>(row),sequence:row.sequence})), materials };
 }
 async function classPayer(db: D1Database, classId: string): Promise<string> {
   const classroom = await getClass(db, classId);
@@ -346,7 +363,7 @@ async function createSubmission(request: Request, user: ProductUser): Promise<Re
       if (exam.originContributionId) await requireEntitlement(db, user.id, ["personal_premium"]);
     } else {
       if (!files.some(file => file.role === "problem" || file.role === "mixed")) throw new HttpError(400, "문제 파일과 답안 파일을 함께 첨부하세요. 한 파일이면 문제·답안 혼합으로 선택하세요.");
-      exam = { id: makeId(), ownerId: user.id, classId: null, title: requireText(body.title, "시험 이름", 200), sourceLabel: optionalText(body.sourceLabel, "문제 출처", 500), sourceUrl: sourceUrl(body.sourceUrl), items: [], files: [], releaseMode: "ai_immediate", revision: 1, createdAt: timestamp };
+      exam = { id: makeId(), ownerId: user.id, classId: null, difficulty: parseExamDifficulty(body.difficulty), title: requireText(body.title, "시험 이름", 200), sourceLabel: optionalText(body.sourceLabel, "문제 출처", 500), sourceUrl: sourceUrl(body.sourceUrl), items: [], files: [], releaseMode: "ai_immediate", revision: 1, createdAt: timestamp };
       createDirectExam = true;
     }
   }
@@ -609,7 +626,22 @@ async function workspaceState(request: Request): Promise<Response> {
     db.prepare("SELECT m.class_id AS classId, m.user_id AS userId, m.role, m.display_name AS displayName, m.joined_at AS joinedAt FROM product_members m WHERE m.user_id = ? OR EXISTS (SELECT 1 FROM product_members own WHERE own.class_id = m.class_id AND own.user_id = ? AND own.role = 'teacher')").bind(user.id, user.id),
     db.prepare("SELECT e.data, e.revision FROM product_exams e WHERE e.owner_id = ? OR EXISTS (SELECT 1 FROM product_members m WHERE m.class_id = e.class_id AND m.user_id = ? AND m.role = 'teacher') ORDER BY e.created_at DESC").bind(user.id, user.id),
     db.prepare("SELECT a.data, m.role FROM product_assignments a JOIN product_members m ON m.class_id = a.class_id WHERE m.user_id = ? ORDER BY a.created_at DESC").bind(user.id),
-    db.prepare("SELECT s.data, s.revision FROM product_submissions s WHERE s.student_id = ? OR EXISTS (SELECT 1 FROM product_members m WHERE m.class_id = s.class_id AND m.user_id = ? AND m.role = 'teacher') ORDER BY s.created_at DESC").bind(user.id, user.id),
+    db.prepare(`
+      SELECT s.data, s.revision, own.user_id AS teacher_id,
+        CASE WHEN own.user_id IS NOT NULL THEN (
+          SELECT json_object('total', json_extract(v.data, '$.result.total'), 'maximum', json_extract(v.data, '$.result.maximum'))
+          FROM product_versions v
+          WHERE v.submission_id = s.id AND (
+            json_extract(v.data, '$.authorType') = 'ai'
+            OR (v.published = 1 AND json_extract(v.data, '$.authorType') = 'teacher' AND json_extract(v.data, '$.teacherReviewed') = 1)
+          )
+          ORDER BY v.version ASC LIMIT 1
+        ) END AS first_feedback_score
+      FROM product_submissions s
+      LEFT JOIN product_members own ON own.class_id = s.class_id AND own.user_id = ? AND own.role = 'teacher' AND ? = 'teacher'
+      WHERE s.student_id = ? OR own.user_id IS NOT NULL
+      ORDER BY s.created_at DESC
+    `).bind(user.id, state.profile?.accountType ?? "", user.id),
     db.prepare("SELECT s.data, s.revision, a.owner_id FROM submissions s LEFT JOIN academies a ON a.id = s.academy_id WHERE s.student_id = ? OR a.owner_id = ? ORDER BY s.created_at DESC").bind(user.id, user.id),
     db.prepare("SELECT data, revision FROM questions WHERE owner_id = ? ORDER BY created_at DESC").bind(user.id),
   ]);
@@ -625,13 +657,16 @@ async function workspaceState(request: Request): Promise<Response> {
     const item = decode<ExamAssignment>(row);
     return row.role === "teacher" ? item : { ...item, exam: studentExam(item.exam) };
   });
-  const teacherClasses = new Set(state.members.filter(member => member.userId === user.id && member.role === "teacher").map(member => member.classId));
   const publishedBySubmission=new Map<string,FeedbackVersion>();
   const publishedRows=await db.prepare("SELECT v.submission_id,v.data FROM product_versions v JOIN product_submissions s ON s.id=v.submission_id WHERE s.student_id=? AND v.published=1 AND v.version=(SELECT MAX(other.version) FROM product_versions other WHERE other.submission_id=v.submission_id AND other.published=1)").bind(user.id).all<DataRow & {submission_id:string}>();
   for(const row of publishedRows.results)publishedBySubmission.set(row.submission_id,decode<FeedbackVersion>(row));
-  state.submissions = await Promise.all((values[4].results as unknown as DataRow[]).map(row => {
+  type SubmissionRow = DataRow & { teacher_id: string | null; first_feedback_score: string | null };
+  state.submissions = await Promise.all((values[4].results as unknown as SubmissionRow[]).map(row => {
     const item = { ...decode<ExamSubmission>(row), revision: row.revision! };
-    return visibleSubmission(db, item, Boolean(item.classId && teacherClasses.has(item.classId)),publishedBySubmission);
+    if (row.teacher_id) {
+      item.firstFeedbackScore = row.first_feedback_score ? JSON.parse(row.first_feedback_score) as FeedbackScore : null;
+    }
+    return visibleSubmission(db, item, Boolean(row.teacher_id), publishedBySubmission);
   }));
   state.submissions.push(...(values[5].results as unknown as (DataRow & { owner_id: string | null })[]).map(row => legacySubmission({ ...decode<Submission>(row), revision: row.revision! }, row.owner_id === user.id)));
   state.exams.push(...(values[6].results as unknown as DataRow[]).map(row => legacyExam({ ...decode<Question>(row), revision: row.revision! })));
@@ -645,6 +680,20 @@ export async function handleProductApi(request: Request, path = new URL(request.
     if (request.method === "GET" && path === "state") return await workspaceState(request);
     const user = await requireProductUser(request);
     const db = productDatabase();
+    const admission = /^submissions\/([^/]+)\/admission-(line|history)$/.exec(path);
+    if (admission && (request.method === "GET" || (admission[2] === "line" && request.method === "POST"))) {
+      const id = decodeURIComponent(admission[1]);
+      noLegacy(id);
+      const item = await fetchSubmission(db, id);
+      const teacher = (await submissionAccess(db, item, user.id)) === "teacher";
+      if (!teacher && (item.classId || (await getProfile(db, user.id))?.accountType !== "personal")) {
+        throw new HttpError(403, "담당 선생님이나 개인 학습공간에서 대학 라인 평가를 볼 수 있습니다.", "ADMISSION_LINE_ACCESS_DENIED");
+      }
+      if (admission[2] === "history") return await admissionHistory(db, item.studentId, user.id, teacher);
+      if (request.method === "GET") return await admissionLine(db, item, user.id, teacher);
+      checkProductOrigin(request);
+      return await admissionLine(db, item, user.id, teacher, await readProductJson(request));
+    }
     if (request.method === "GET") {
       if (/^submissions\/[^/]+\/messages$/.test(path)) return await pollMessages(request,db,decodeURIComponent(path.split("/")[1]),user);
       if (/^files\/[^/]+$/.test(path)) return await fileResponse(db, decodeURIComponent(path.split("/")[1]), user);

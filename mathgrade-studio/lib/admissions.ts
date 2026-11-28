@@ -120,8 +120,9 @@ export function comparePastCutoffs(
       if (conflicts.has(key) || student.university.trim() !== reference.university.trim()
         || student.examKey.trim() !== reference.examKey.trim()
         || student.academicYear !== reference.academicYear || student.scale !== reference.scale) continue;
-      const gap = round(student.score - reference.score);
-      const position = gap > 0 ? "above" : gap < 0 ? "below" : "equal";
+      const difference = student.score - reference.score;
+      const gap = round(difference);
+      const position = difference > 0 ? "above" : difference < 0 ? "below" : "equal";
       const description = position === "equal"
         ? "해당 학년도에 입력된 논술 최저점과 같습니다."
         : `해당 학년도에 입력된 논술 최저점보다 ${Math.abs(gap)}점 ${position === "above" ? "높습니다" : "낮습니다"}.`;

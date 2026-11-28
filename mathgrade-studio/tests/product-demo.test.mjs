@@ -8,10 +8,11 @@ import ts from 'typescript';
 
 const app = fileURLToPath(new URL('..', import.meta.url));
 const scratch = await mkdtemp(join(tmpdir(), 'mathgrade-product-demo-'));
-for (const [folder, name] of [['client', 'api'], ['client', 'product-demo'], ['server', 'validation'], ['server', 'product-analysis']]) {
+for (const [folder, name] of [['', 'exam-difficulty'], ['client', 'api'], ['client', 'product-demo'], ['server', 'validation'], ['server', 'product-analysis']]) {
   const source = (await readFile(join(app, 'lib', folder, `${name}.ts`), 'utf8'))
     .replace(/from "\.\/api"/g, 'from "./api.mjs"')
     .replace(/from "\.\.\/server\/product-analysis"/g, 'from "./product-analysis.mjs"')
+    .replace('from "../exam-difficulty"', 'from "./exam-difficulty.mjs"')
     .replace(/from "\.\/validation"/g, 'from "./validation.mjs"');
   await writeFile(join(scratch, `${name}.mjs`), ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText);
 }
